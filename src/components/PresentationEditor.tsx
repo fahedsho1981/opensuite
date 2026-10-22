@@ -77,6 +77,12 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
   const [historyIndex, setHistoryIndex] = useState(0);
   const [showLayoutPicker, setShowLayoutPicker] = useState(false);
   const [showNotes, setShowNotes] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
+  const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
+  const [dragElementId, setDragElementId] = useState<string | null>(null);
+  const [isResizing, setIsResizing] = useState(false);
+  const [resizeHandle, setResizeHandle] = useState<string | null>(null);
+  const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 });
 
   const slide = content[currentSlide];
 
@@ -182,6 +188,108 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
     const newElements = slideElements.filter(el => el.id !== elementId);
     setElements({ ...elements, [slide.id]: newElements });
     setSelectedElement(null);
+  };
+
+  // Drag handlers
+  const handleElementMouseDown = (e: React.MouseEvent, elementId: string) => {
+    e.stopPropagation();
+    const element = (elements[slide.id] || []).find(el => el.id === elementId);
+    if (!element) return;
+
+    setSelectedElement(elementId);
+    setIsDragging(true);
+    setDragElementId(elementId);
+    setDragStart({
+      x: e.clientX - element.x * (zoom / 100),
+      y: e.clientY - element.y * (zoom / 100)
+    });
+  };
+
+  const handleSlideMouseMove = (e: React.MouseEvent) => {
+    if (!isDragging || !dragElementId) return;
+
+    const slideElements = elements[slide.id] || [];
+    const newElements = slideElements.map(el => {
+      if (el.id === dragElementId) {
+        const newX = (e.clientX - dragStart.x) / (zoom / 100);
+        const newY = (e.clientY - dragStart.y) / (zoom / 100);
+        return { ...el, x: Math.max(0, newX), y: Math.max(0, newY) };
+      }
+      return el;
+    });
+
+    setElements({ ...elements, [slide.id]: newElements });
+  };
+
+  const handleSlideMouseUp = () => {
+    setIsDragging(false);
+    setDragElementId(null);
+    setIsResizing(false);
+    setResizeHandle(null);
+  };
+
+  // Resize handlers
+  const handleResizeMouseDown = (e: React.MouseEvent, elementId: string, handle: string) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const element = (elements[slide.id] || []).find(el => el.id === elementId);
+    if (!element) return;
+
+    setIsResizing(true);
+    setResizeHandle(handle);
+    setDragElementId(elementId);
+    setResizeStart({
+      x: e.clientX,
+      y: e.clientY,
+      width: element.width,
+      height: element.height
+    });
+  };
+
+  // Update mouse move to handle resize
+  const handleSlideMouseMoveUpdated = (e: React.MouseEvent) => {
+    if (isResizing && dragElementId && resizeHandle) {
+      const dx = (e.clientX - resizeStart.x) / (zoom / 100);
+      const dy = (e.clientY - resizeStart.y) / (zoom / 100);
+
+      const slideElements = elements[slide.id] || [];
+      const newElements = slideElements.map(el => {
+        if (el.id === dragElementId) {
+          let newWidth = resizeStart.width;
+          let newHeight = resizeStart.height;
+          let newX = el.x;
+          let newY = el.y;
+
+          if (resizeHandle.includes('e')) newWidth = Math.max(50, resizeStart.width + dx);
+          if (resizeHandle.includes('w')) {
+            newWidth = Math.max(50, resizeStart.width - dx);
+            newX = el.x + dx;
+          }
+          if (resizeHandle.includes('s')) newHeight = Math.max(30, resizeStart.height + dy);
+          if (resizeHandle.includes('n')) {
+            newHeight = Math.max(30, resizeStart.height - dy);
+            newY = el.y + dy;
+          }
+
+          return { ...el, x: newX, y: newY, width: newWidth, height: newHeight };
+        }
+        return el;
+      });
+
+      setElements({ ...elements, [slide.id]: newElements });
+    } else if (isDragging && dragElementId) {
+      const slideElements = elements[slide.id] || [];
+      const newElements = slideElements.map(el => {
+        if (el.id === dragElementId) {
+          const newX = (e.clientX - dragStart.x) / (zoom / 100);
+          const newY = (e.clientY - dragStart.y) / (zoom / 100);
+          return { ...el, x: Math.max(0, newX), y: Math.max(0, newY) };
+        }
+        return el;
+      });
+
+      setElements({ ...elements, [slide.id]: newElements });
+    }
   };
 
   const exportPresentation = () => {
@@ -628,7 +736,12 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
                 </div>
               )}
 
-              <div className="w-full h-full p-12 flex flex-col justify-center items-center relative">
+              <div 
+                className="w-full h-full p-12 flex flex-col justify-center items-center relative"
+                onMouseMove={handleSlideMouseMoveUpdated}
+                onMouseUp={handleSlideMouseUp}
+                onMouseLeave={handleSlideMouseUp}
+              >
                 {slide.title && (
                   <input
                     value={slide.title}
@@ -652,13 +765,24 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
                 {(elements[slide.id] || []).map(el => (
                   <div
                     key={el.id}
-                    onClick={() => setSelectedElement(el.id)}
-                    className={`absolute cursor-move ${selectedElement === el.id ? 'ring-2 ring-blue-500' : ''}`}
+                    onMouseDown={(e) => handleElementMouseDown(e, el.id)}
+                    onDoubleClick={(e) => {
+                      e.stopPropagation();
+                      if (el.type === 'text') {
+                        const newText = prompt('Edit text:', el.content || '');
+                        if (newText !== null) {
+                          updateElement(el.id, { content: newText });
+                        }
+                      }
+                    }}
+                    className={`absolute ${selectedElement === el.id ? 'ring-2 ring-blue-500' : ''}`}
                     style={{
                       left: `${el.x * (zoom / 100)}px`,
                       top: `${el.y * (zoom / 100)}px`,
                       width: `${el.width * (zoom / 100)}px`,
                       height: `${el.height * (zoom / 100)}px`,
+                      cursor: isDragging && dragElementId === el.id ? 'grabbing' : 'move',
+                      userSelect: 'none',
                     }}
                   >
                     {el.type === 'text' && (
@@ -671,6 +795,12 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
                           fontWeight: el.style?.bold ? 'bold' : 'normal',
                           fontStyle: el.style?.italic ? 'italic' : 'normal',
                           textDecoration: el.style?.underline ? 'underline' : 'none',
+                          width: '100%',
+                          height: '100%',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: el.style?.align === 'left' ? 'flex-start' : el.style?.align === 'right' ? 'flex-end' : 'center',
+                          padding: '8px',
                         }}
                       >
                         {el.content}
@@ -686,6 +816,54 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
                           clipPath: el.style?.shapeType === 'triangle' ? 'polygon(50% 0%, 0% 100%, 100% 100%)' : undefined,
                         }}
                       />
+                    )}
+                    
+                    {/* Resize handles - only show when selected */}
+                    {selectedElement === el.id && (
+                      <>
+                        {/* Corner handles */}
+                        <div
+                          onMouseDown={(e) => handleResizeMouseDown(e, el.id, 'nw')}
+                          className="absolute -top-1 -left-1 w-2 h-2 bg-blue-500 border border-white cursor-nwse-resize"
+                          style={{ zIndex: 10 }}
+                        />
+                        <div
+                          onMouseDown={(e) => handleResizeMouseDown(e, el.id, 'ne')}
+                          className="absolute -top-1 -right-1 w-2 h-2 bg-blue-500 border border-white cursor-nesw-resize"
+                          style={{ zIndex: 10 }}
+                        />
+                        <div
+                          onMouseDown={(e) => handleResizeMouseDown(e, el.id, 'sw')}
+                          className="absolute -bottom-1 -left-1 w-2 h-2 bg-blue-500 border border-white cursor-nesw-resize"
+                          style={{ zIndex: 10 }}
+                        />
+                        <div
+                          onMouseDown={(e) => handleResizeMouseDown(e, el.id, 'se')}
+                          className="absolute -bottom-1 -right-1 w-2 h-2 bg-blue-500 border border-white cursor-nwse-resize"
+                          style={{ zIndex: 10 }}
+                        />
+                        {/* Edge handles */}
+                        <div
+                          onMouseDown={(e) => handleResizeMouseDown(e, el.id, 'n')}
+                          className="absolute -top-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-blue-500 border border-white cursor-ns-resize"
+                          style={{ zIndex: 10 }}
+                        />
+                        <div
+                          onMouseDown={(e) => handleResizeMouseDown(e, el.id, 's')}
+                          className="absolute -bottom-1 left-1/2 -translate-x-1/2 w-2 h-2 bg-blue-500 border border-white cursor-ns-resize"
+                          style={{ zIndex: 10 }}
+                        />
+                        <div
+                          onMouseDown={(e) => handleResizeMouseDown(e, el.id, 'w')}
+                          className="absolute top-1/2 -translate-y-1/2 -left-1 w-2 h-2 bg-blue-500 border border-white cursor-ew-resize"
+                          style={{ zIndex: 10 }}
+                        />
+                        <div
+                          onMouseDown={(e) => handleResizeMouseDown(e, el.id, 'e')}
+                          className="absolute top-1/2 -translate-y-1/2 -right-1 w-2 h-2 bg-blue-500 border border-white cursor-ew-resize"
+                          style={{ zIndex: 10 }}
+                        />
+                      </>
                     )}
                   </div>
                 ))}
