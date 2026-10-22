@@ -1252,7 +1252,7 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
         </div>
       )}
 
-      {/* FIX #16: Spreadsheet Grid - use transform for zoom instead of fontSize */}
+      {/* Spreadsheet Grid - Fixed zoom and column layout */}
       <div 
         className="flex-1 overflow-auto" 
         ref={gridRef} 
@@ -1260,8 +1260,7 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
         onKeyDown={handleGridKeyDown}
         style={{ outline: 'none' }}
       >
-        <div style={{ transform: `scale(${zoom / 100})`, transformOrigin: 'top left', width: `${10000 * 100 / zoom}%` }}>
-          <table className="border-collapse" style={{ minWidth: '100%' }}>
+        <table className="border-collapse" style={{ fontSize: `${zoom}%` }}>
             <thead className="sticky top-0 z-10">
               <tr>
                 <th className="w-12 min-w-[48px] bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-xs font-medium text-gray-500 dark:text-gray-400 sticky left-0 z-20"></th>
@@ -1363,7 +1362,6 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
               })}
             </tbody>
           </table>
-        </div>
       </div>
 
       {/* Sheet Tabs */}
