@@ -1,20 +1,29 @@
-import React, { useRef, useState, useEffect, useMemo } from 'react';
+import { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight, AlignJustify,
-  List, ListOrdered, Heading1, Heading2, Heading3, Undo, Redo,
-  Download, Type, Indent, Outdent, Strikethrough, Link, Image,
-  Table, Minus, Quote, Subscript, Superscript, Eraser,
+  List, ListOrdered, Undo, Redo,
+  Download, Indent, Outdent, Strikethrough,
+  Subscript, Superscript, Eraser,
   Search, Printer, FileDown, ZoomIn, ZoomOut,
-  ChevronDown, X, Upload, Smile, Palette, Columns,
-  FileText, Save, MoreHorizontal, Ruler as RulerIcon,
-  ImagePlus, Link2, Table2, Minus as MinusIcon, Quote as QuoteIcon,
-  FileMinus2, Hash, RemoveFormatting
+  ChevronDown, X, Upload, Columns,
+  FileText, Save, Ruler as RulerIcon,
+  ImagePlus, Link2, Table2, Minus as MinusIcon,
+  FileMinus2, Hash,
+  Superscript as SupIcon, Heading1, Heading2, Heading3, Quote
 } from 'lucide-react';
 
 // Extend Window interface for window.find
 declare global {
   interface Window {
-    find(text: string, caseSensitive?: boolean, backward?: boolean, wrapAround?: boolean): boolean;
+    find(
+      text?: string,
+      caseSensitive?: boolean,
+      backward?: boolean,
+      wrapAround?: boolean,
+      wholeWord?: boolean,
+      searchInFrames?: boolean,
+      showDialog?: boolean
+    ): boolean;
   }
 }
 import { exportDocx } from '../utils/fileHandlers';
@@ -27,20 +36,18 @@ interface DocumentEditorProps {
 }
 
 const FONT_FAMILIES = [
-  { name: 'Arial', value: 'Arial, sans-serif' },
-  { name: 'Times New Roman', value: '"Times New Roman", serif' },
-  { name: 'Courier New', value: '"Courier New", monospace' },
-  { name: 'Georgia', value: 'Georgia, serif' },
-  { name: 'Verdana', value: 'Verdana, sans-serif' },
-  { name: 'Tahoma', value: 'Tahoma, sans-serif' },
-  { name: 'Trebuchet MS', value: '"Trebuchet MS", sans-serif' },
-  { name: 'Comic Sans MS', value: '"Comic Sans MS", cursive' },
-  { name: 'Impact', value: 'Impact, sans-serif' },
-  { name: 'Lucida Console', value: '"Lucida Console", monospace' },
-  { name: 'Palatino', value: 'Palatino, serif' },
-  { name: 'Garamond', value: 'Garamond, serif' },
-  { name: 'Bookman', value: 'Bookman, serif' },
-  { name: 'Avant Garde', value: '"Avant Garde", sans-serif' },
+  { name: 'Arial', value: 'Arial, sans-serif', command: 'Arial' },
+  { name: 'Times New Roman', value: '"Times New Roman", serif', command: 'Times New Roman' },
+  { name: 'Courier New', value: '"Courier New", monospace', command: 'Courier New' },
+  { name: 'Georgia', value: 'Georgia, serif', command: 'Georgia' },
+  { name: 'Verdana', value: 'Verdana, sans-serif', command: 'Verdana' },
+  { name: 'Tahoma', value: 'Tahoma, sans-serif', command: 'Tahoma' },
+  { name: 'Trebuchet MS', value: '"Trebuchet MS", sans-serif', command: 'Trebuchet MS' },
+  { name: 'Comic Sans MS', value: '"Comic Sans MS", cursive', command: 'Comic Sans MS' },
+  { name: 'Impact', value: 'Impact, sans-serif', command: 'Impact' },
+  { name: 'Lucida Console', value: '"Lucida Console", monospace', command: 'Lucida Console' },
+  { name: 'Palatino', value: 'Palatino, serif', command: 'Palatino' },
+  { name: 'Garamond', value: 'Garamond, serif', command: 'Garamond' },
 ];
 
 const TEXT_COLORS = [
@@ -53,7 +60,7 @@ const TEXT_COLORS = [
 ];
 
 const HIGHLIGHT_COLORS = [
-  'transparent', '#ffff00', '#ffff00', '#00ff00', '#00ffff', '#ff00ff',
+  'transparent', '#ffff00', '#00ff00', '#00ffff', '#ff00ff',
   '#ff0000', '#0000ff', '#800080', '#808000', '#008080', '#008000',
   '#c0c0c0', '#808080', '#ff9900', '#00ccff', '#993366', '#999999',
 ];
@@ -66,17 +73,16 @@ const SPECIAL_CHARS = [
   '♠', '♣', '♥', '♦', '★', '☆', '✓', '✗',
   'α', 'β', 'γ', 'δ', 'ε', 'π', 'σ', 'μ',
   'Ω', 'Σ', 'Δ', 'Φ', 'Ψ', 'λ', 'θ', 'ω',
-  '„', '“', '”', '‚', '‘', '’', '«', '»',
+  '\u201E', '\u201C', '\u201D', '\u201A', '\u2018', '\u2019', '\u00AB', '\u00BB',
   '—', '–', '…', '•', '†', '‡', '§', '¶',
 ];
 
 type ModalType = 'none' | 'findReplace' | 'insertImage' | 'specialChars' | 'lineSpacing' | 'insertTable' | 'insertLink';
+type ActiveDropdown = 'none' | 'font' | 'textColor' | 'highlightColor';
 
 export default function DocumentEditor({ content, onChange, fileName, readOnly = false }: DocumentEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
-  const [isReady, setIsReady] = useState(false);
-  const [currentFont, setCurrentFont] = useState('Arial, sans-serif');
-  const [currentFontSize, setCurrentFontSize] = useState('3');
+  const savedSelectionRef = useRef<Range | null>(null);
   const [zoom, setZoom] = useState(100);
   const [showRuler, setShowRuler] = useState(true);
   const [modal, setModal] = useState<ModalType>('none');
@@ -89,34 +95,61 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   const [tableRows, setTableRows] = useState(3);
   const [tableCols, setTableCols] = useState(3);
   const [lineSpacingValue, setLineSpacingValue] = useState(1.5);
-  const [showFontDropdown, setShowFontDropdown] = useState(false);
-  const [showTextColorPicker, setShowTextColorPicker] = useState(false);
-  const [showHighlightPicker, setShowHighlightPicker] = useState(false);
+  const [activeDropdown, setActiveDropdown] = useState<ActiveDropdown>('none');
+  const [headingValue, setHeadingValue] = useState('p');
 
-  // Stats
+  // FIX #2: Calculate stats from HTML string directly instead of reading DOM
   const stats = useMemo(() => {
-    if (!editorRef.current) return { words: 0, chars: 0, paragraphs: 0 };
-    const text = editorRef.current.innerText || '';
+    if (!content) return { words: 0, chars: 0, paragraphs: 0 };
+    // Strip HTML tags to get plain text
+    const tempDiv = document.createElement('div');
+    tempDiv.innerHTML = content;
+    const text = tempDiv.textContent || tempDiv.innerText || '';
     const words = text.trim() ? text.trim().split(/\s+/).length : 0;
     const chars = text.length;
-    const paragraphs = editorRef.current.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, blockquote').length || 1;
+    // Count block-level elements
+    const blockMatch = content.match(/<(p|h[1-6]|li|blockquote|div)[\s>]/gi);
+    const paragraphs = blockMatch ? blockMatch.length : 1;
     return { words, chars, paragraphs };
-  }, [content, isReady]);
+  }, [content]);
 
+  // FIX #1: Always sync content when prop changes (for file switching)
   useEffect(() => {
-    if (editorRef.current && !isReady) {
+    if (editorRef.current && editorRef.current.innerHTML !== content) {
       editorRef.current.innerHTML = content;
-      setIsReady(true);
     }
-  }, [content, isReady]);
+  }, [content]);
 
-  const execCommand = (command: string, value?: string) => {
+  // Save selection before opening modals
+  const saveSelection = () => {
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount > 0) {
+      const range = selection.getRangeAt(0);
+      if (editorRef.current?.contains(range.commonAncestorContainer)) {
+        savedSelectionRef.current = range.cloneRange();
+      }
+    }
+  };
+
+  // Restore selection before inserting content
+  const restoreSelection = () => {
+    if (savedSelectionRef.current) {
+      const selection = window.getSelection();
+      if (selection) {
+        selection.removeAllRanges();
+        selection.addRange(savedSelectionRef.current);
+      }
+    }
+    editorRef.current?.focus();
+  };
+
+  const execCommand = useCallback((command: string, value?: string) => {
     editorRef.current?.focus();
     document.execCommand(command, false, value);
     if (editorRef.current) {
       onChange(editorRef.current.innerHTML);
     }
-  };
+  }, [onChange]);
 
   const handleInput = () => {
     if (editorRef.current) {
@@ -124,6 +157,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     }
   };
 
+  // FIX #3: Use editorRef.current.innerHTML for save
   const handleExport = async () => {
     if (editorRef.current) {
       await exportDocx(editorRef.current.innerHTML, fileName);
@@ -135,8 +169,12 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   };
 
   const handleSave = () => {
-    // Trigger download as HTML for now
-    const blob = new Blob([`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${fileName}</title></head><body>${content}</body></html>`], { type: 'text/html' });
+    if (!editorRef.current) return;
+    const currentContent = editorRef.current.innerHTML;
+    const blob = new Blob(
+      [`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${fileName}</title><style>body{font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:40px;line-height:1.8;}</style></head><body>${currentContent}</body></html>`],
+      { type: 'text/html' }
+    );
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -145,9 +183,20 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     URL.revokeObjectURL(url);
   };
 
-  const insertImage = (src: string) => {
-    execCommand('insertHTML', `<img src="${src}" style="max-width: 100%; height: auto; margin: 1em 0; border-radius: 4px;" />`);
+  // FIX #4: Save selection before opening modal, restore before inserting
+  const openModal = (type: ModalType) => {
+    saveSelection();
+    setModal(type);
+  };
+
+  const closeModal = () => {
     setModal('none');
+  };
+
+  const insertImage = (src: string) => {
+    restoreSelection();
+    execCommand('insertHTML', `<img src="${src}" style="max-width: 100%; height: auto; margin: 1em 0; border-radius: 4px; display: block;" />`);
+    closeModal();
     setImageUrl('');
   };
 
@@ -166,82 +215,150 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   const insertLink = () => {
     if (linkUrl) {
+      restoreSelection();
       const displayText = linkText || linkUrl;
-      execCommand('insertHTML', `<a href="${linkUrl}" target="_blank" style="color: #2563eb; text-decoration: underline;">${displayText}</a>`);
-      setModal('none');
+      // Sanitize URL
+      const safeUrl = linkUrl.startsWith('http') ? linkUrl : `https://${linkUrl}`;
+      execCommand('insertHTML', `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${displayText}</a>&nbsp;`);
+      closeModal();
       setLinkUrl('');
       setLinkText('');
     }
   };
 
   const insertTable = () => {
+    restoreSelection();
     let table = '<table style="border-collapse: collapse; width: 100%; margin: 1em 0;"><tbody>';
     for (let r = 0; r < tableRows; r++) {
       table += '<tr>';
       for (let c = 0; c < tableCols; c++) {
         const tag = r === 0 ? 'th' : 'td';
-        table += `<${tag} style="border: 1px solid #d1d5db; padding: 8px 12px; min-width: 80px;${r === 0 ? ' background-color: #f3f4f6; font-weight: 600;' : ''}">&nbsp;</${tag}>`;
+        table += `<${tag} style="border: 1px solid #d1d5db; padding: 8px 12px; min-width: 80px;${r === 0 ? ' background-color: #f3f4f6; font-weight: 600;' : ''}" contenteditable="true">&nbsp;</${tag}>`;
       }
       table += '</tr>';
     }
-    table += '</tbody></table>';
+    table += '</tbody></table><p><br></p>';
     execCommand('insertHTML', table);
-    setModal('none');
+    closeModal();
   };
 
   const insertPageBreak = () => {
-    execCommand('insertHTML', '<div style="page-break-after: always; border-top: 2px dashed #d1d5db; margin: 2em 0; height: 0;"></div><p>&nbsp;</p>');
+    execCommand('insertHTML', '<div style="page-break-after: always; border-top: 2px dashed #9ca3af; margin: 2em 0; padding-top: 4px;"><span style="font-size: 10px; color: #9ca3af;">— Page Break —</span></div><p><br></p>');
   };
 
   const insertSpecialChar = (char: string) => {
-    execCommand('insertHTML', char);
+    restoreSelection();
+    execCommand('insertText', char);
   };
 
+  // FIX #8: Apply line spacing to all block elements in selection
   const applyLineSpacing = () => {
-    if (editorRef.current) {
-      const selection = window.getSelection();
-      if (selection && selection.rangeCount > 0) {
-        const range = selection.getRangeAt(0);
-        let node = range.commonAncestorContainer;
-        while (node && node !== editorRef.current) {
-          if (node instanceof Element && ['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'DIV'].includes(node.tagName)) {
-            (node as HTMLElement).style.lineHeight = String(lineSpacingValue);
+    if (!editorRef.current) return;
+    
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      // If no selection, apply to all paragraphs
+      const allBlocks = editorRef.current.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, div');
+      allBlocks.forEach(el => {
+        (el as HTMLElement).style.lineHeight = String(lineSpacingValue);
+      });
+    } else {
+      const range = selection.getRangeAt(0);
+      const container = range.commonAncestorContainer;
+      
+      // Find all block elements in the range
+      const walker = document.createTreeWalker(
+        editorRef.current,
+        NodeFilter.SHOW_ELEMENT,
+        {
+          acceptNode: (node) => {
+            const el = node as Element;
+            if (['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'DIV'].includes(el.tagName)) {
+              if (range.intersectsNode(el)) {
+                return NodeFilter.FILTER_ACCEPT;
+              }
+            }
+            return NodeFilter.FILTER_SKIP;
+          }
+        }
+      );
+
+      let node = walker.nextNode();
+      let found = false;
+      while (node) {
+        (node as HTMLElement).style.lineHeight = String(lineSpacingValue);
+        found = true;
+        node = walker.nextNode();
+      }
+
+      // If no block elements found, try to find parent block
+      if (!found) {
+        let parentEl = container.nodeType === Node.TEXT_NODE ? container.parentElement : container as Element;
+        while (parentEl && parentEl !== editorRef.current) {
+          if (['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'DIV'].includes(parentEl.tagName)) {
+            (parentEl as HTMLElement).style.lineHeight = String(lineSpacingValue);
             break;
           }
-          node = node.parentNode!;
+          parentEl = parentEl.parentElement;
         }
       }
-      onChange(editorRef.current.innerHTML);
     }
-    setModal('none');
+    
+    onChange(editorRef.current.innerHTML);
+    closeModal();
   };
 
+  // FIX #7: Find in text content, not HTML
   const handleFind = () => {
     if (!findText || !editorRef.current) return;
-    const content = editorRef.current.innerHTML;
+    
+    // Count matches in text content only
+    const textContent = editorRef.current.textContent || '';
     const regex = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-    const matches = content.match(regex);
+    const matches = textContent.match(regex);
     setFindCount(matches?.length || 0);
     
-    // Use browser's find
-    window.find(findText, false, false, true);
+    // Use browser's native find for highlighting
+    if (window.find) {
+      window.find(findText, false, false, true, false, false, false);
+    }
   };
 
+  // FIX #7: Replace using DOM manipulation, not HTML string replacement
   const handleReplace = (all: boolean = false) => {
     if (!findText || !editorRef.current) return;
     
     if (all) {
+      // Walk through text nodes and replace
+      const walker = document.createTreeWalker(
+        editorRef.current,
+        NodeFilter.SHOW_TEXT,
+        null
+      );
+      
+      const textNodes: Text[] = [];
+      let node = walker.nextNode();
+      while (node) {
+        textNodes.push(node as Text);
+        node = walker.nextNode();
+      }
+      
       const regex = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-      const newHtml = editorRef.current.innerHTML.replace(regex, replaceText);
-      editorRef.current.innerHTML = newHtml;
-      onChange(newHtml);
-      setFindCount(0);
+      textNodes.forEach(textNode => {
+        if (regex.test(textNode.nodeValue || '')) {
+          textNode.nodeValue = (textNode.nodeValue || '').replace(regex, replaceText);
+        }
+      });
+      
+      onChange(editorRef.current.innerHTML);
+      handleFind(); // Update count
     } else {
-      if (window.find(findText)) {
+      if (window.find && window.find(findText)) {
         const selection = window.getSelection();
         if (selection && selection.toString().toLowerCase() === findText.toLowerCase()) {
           document.execCommand('insertText', false, replaceText);
           if (editorRef.current) onChange(editorRef.current.innerHTML);
+          handleFind(); // Update count
         }
       }
     }
@@ -251,49 +368,55 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     execCommand('removeFormat');
   };
 
-  const setFontFamily = (font: string) => {
-    setCurrentFont(font);
-    execCommand('fontName', font);
-    setShowFontDropdown(false);
+  // FIX #5: Use just the font name for fontName command
+  const setFontFamily = (font: typeof FONT_FAMILIES[0]) => {
+    execCommand('fontName', font.command);
+    setActiveDropdown('none');
   };
 
   const setFontSizeValue = (size: string) => {
-    setCurrentFontSize(size);
     execCommand('fontSize', size);
   };
 
   const setTextColor = (color: string) => {
+    restoreSelection();
     execCommand('foreColor', color);
-    setShowTextColorPicker(false);
+    setActiveDropdown('none');
   };
 
   const setHighlightColor = (color: string) => {
-    execCommand('hiliteColor', color);
-    setShowHighlightPicker(false);
+    restoreSelection();
+    if (color === 'transparent') {
+      execCommand('hiliteColor', 'transparent');
+      // Fallback: remove background color
+      execCommand('backColor', 'transparent');
+    } else {
+      execCommand('hiliteColor', color);
+    }
+    setActiveDropdown('none');
   };
 
-  // Close dropdowns when clicking outside
-  useEffect(() => {
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('[data-dropdown]')) {
-        setShowFontDropdown(false);
-        setShowTextColorPicker(false);
-        setShowHighlightPicker(false);
-      }
-    };
-    document.addEventListener('mousedown', handleClick);
-    return () => document.removeEventListener('mousedown', handleClick);
-  }, []);
+  // FIX #6: Use single activeDropdown state to manage dropdowns
+  const toggleDropdown = (dropdown: ActiveDropdown) => {
+    saveSelection();
+    setActiveDropdown(prev => prev === dropdown ? 'none' : dropdown);
+  };
 
-  // Keyboard shortcuts
+  // FIX #12 & #13: Escape key closes modals, overlay click closes modals
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (modal !== 'none') {
+          closeModal();
+        }
+        setActiveDropdown('none');
+      }
+      
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey) {
         switch (e.key.toLowerCase()) {
           case 'f':
             e.preventDefault();
-            setModal('findReplace');
+            openModal('findReplace');
             break;
           case 'p':
             e.preventDefault();
@@ -303,16 +426,108 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             e.preventDefault();
             handleSave();
             break;
+          case 'b':
+            if (document.activeElement === editorRef.current || editorRef.current?.contains(document.activeElement)) {
+              e.preventDefault();
+              execCommand('bold');
+            }
+            break;
+          case 'i':
+            if (document.activeElement === editorRef.current || editorRef.current?.contains(document.activeElement)) {
+              e.preventDefault();
+              execCommand('italic');
+            }
+            break;
+          case 'u':
+            if (document.activeElement === editorRef.current || editorRef.current?.contains(document.activeElement)) {
+              e.preventDefault();
+              execCommand('underline');
+            }
+            break;
         }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [modal, execCommand]);
+
+  // FIX #19: Paste handler to clean up pasted content
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const handlePaste = (e: ClipboardEvent) => {
+      e.preventDefault();
+      const clipboardData = e.clipboardData;
+      if (!clipboardData) return;
+
+      // Try to get HTML first, then fall back to plain text
+      let html = clipboardData.getData('text/html');
+      const text = clipboardData.getData('text/plain');
+
+      if (html) {
+        // Clean the HTML - remove scripts, styles, and dangerous elements
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = html;
+        
+        // Remove script and style tags
+        tempDiv.querySelectorAll('script, style, link, meta').forEach(el => el.remove());
+        
+        // Remove event handlers and dangerous attributes
+        tempDiv.querySelectorAll('*').forEach(el => {
+          Array.from(el.attributes).forEach(attr => {
+            if (attr.name.startsWith('on') || attr.name === 'style') {
+              el.removeAttribute(attr.name);
+            }
+          });
+        });
+        
+        html = tempDiv.innerHTML;
+        document.execCommand('insertHTML', false, html);
+      } else if (text) {
+        // Insert as plain text, preserving line breaks
+        const lines = text.split('\n');
+        const htmlContent = lines.map(line => 
+          line.trim() ? `<p>${line}</p>` : '<p><br></p>'
+        ).join('');
+        document.execCommand('insertHTML', false, htmlContent);
+      }
+      
+      if (editorRef.current) {
+        onChange(editorRef.current.innerHTML);
+      }
+    };
+
+    editor.addEventListener('paste', handlePaste);
+    return () => editor.removeEventListener('paste', handlePaste);
+  }, [onChange]);
+
+  // FIX #18: Save selection on mouseup/keyup in editor
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    const saveSel = () => {
+      const selection = window.getSelection();
+      if (selection && selection.rangeCount > 0) {
+        const range = selection.getRangeAt(0);
+        if (editor.contains(range.commonAncestorContainer)) {
+          savedSelectionRef.current = range.cloneRange();
+        }
+      }
+    };
+
+    editor.addEventListener('mouseup', saveSel);
+    editor.addEventListener('keyup', saveSel);
+    return () => {
+      editor.removeEventListener('mouseup', saveSel);
+      editor.removeEventListener('keyup', saveSel);
+    };
   }, []);
 
   const ToolbarButton = ({ icon: Icon, action, title, active = false }: any) => (
     <button
-      onClick={action}
+      onClick={() => { saveSelection(); action(); }}
       disabled={readOnly}
       title={title}
       className={`p-1.5 rounded transition-colors disabled:opacity-50 ${
@@ -327,6 +542,18 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   const ToolbarDivider = () => <div className="w-px h-6 bg-gray-200 dark:bg-gray-700 mx-1 self-center" />;
 
+  // FIX #14: Fix the "OR" divider styling
+  const OrDivider = () => (
+    <div className="relative py-2">
+      <div className="absolute inset-0 flex items-center">
+        <div className="w-full border-t border-gray-200 dark:border-gray-700"></div>
+      </div>
+      <div className="relative flex justify-center">
+        <span className="bg-white dark:bg-gray-900 px-3 text-xs text-gray-500">OR</span>
+      </div>
+    </div>
+  );
+
   return (
     <div className="flex flex-col h-full bg-gray-100 dark:bg-gray-800">
       {/* Top Menu Bar */}
@@ -340,7 +567,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         <button className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
           View
         </button>
-        <button className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
+        <button onClick={() => openModal('insertImage')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
           Insert
         </button>
         <button className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
@@ -369,21 +596,21 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
           <ToolbarButton icon={Redo} action={() => execCommand('redo')} title="Redo (Ctrl+Y)" />
           <ToolbarDivider />
 
-          {/* Font Family */}
-          <div className="relative" data-dropdown>
+          {/* FIX #5 & #6: Font Family with proper command value */}
+          <div className="relative" data-dropdown="font">
             <button
-              onClick={() => setShowFontDropdown(!showFontDropdown)}
+              onClick={() => toggleDropdown('font')}
               className="flex items-center gap-1 px-2 py-1 border border-gray-200 dark:border-gray-700 rounded hover:bg-gray-50 dark:hover:bg-gray-800 text-sm min-w-[140px] justify-between"
             >
-              <span className="truncate">{FONT_FAMILIES.find(f => f.value === currentFont)?.name || 'Arial'}</span>
+              <span className="truncate">Arial</span>
               <ChevronDown className="w-3 h-3 text-gray-500" />
             </button>
-            {showFontDropdown && (
+            {activeDropdown === 'font' && (
               <div className="absolute top-full left-0 mt-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 max-h-64 overflow-y-auto w-56">
                 {FONT_FAMILIES.map(font => (
                   <button
-                    key={font.value}
-                    onClick={() => setFontFamily(font.value)}
+                    key={font.command}
+                    onClick={() => setFontFamily(font)}
                     className="w-full text-left px-3 py-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 text-sm"
                     style={{ fontFamily: font.value }}
                   >
@@ -396,8 +623,8 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
           {/* Font Size */}
           <select
-            value={currentFontSize}
             onChange={(e) => setFontSizeValue(e.target.value)}
+            defaultValue="3"
             className="px-2 py-1 border border-gray-200 dark:border-gray-700 rounded text-sm bg-white dark:bg-gray-900 ml-1"
           >
             <option value="1">8</option>
@@ -411,10 +638,13 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
           <ToolbarDivider />
 
-          {/* Headings */}
+          {/* FIX #9: Heading select - reset after selection */}
           <select
-            onChange={(e) => execCommand('formatBlock', e.target.value)}
-            defaultValue="p"
+            value={headingValue}
+            onChange={(e) => {
+              execCommand('formatBlock', e.target.value);
+              setHeadingValue(e.target.value);
+            }}
             className="px-2 py-1 border border-gray-200 dark:border-gray-700 rounded text-sm bg-white dark:bg-gray-900"
           >
             <option value="p">Normal</option>
@@ -440,25 +670,26 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
           <ToolbarDivider />
 
-          {/* Text Color */}
-          <div className="relative" data-dropdown>
+          {/* FIX #6: Text Color with single dropdown state */}
+          <div className="relative" data-dropdown="textColor">
             <button
-              onClick={() => setShowTextColorPicker(!showTextColorPicker)}
+              onClick={() => toggleDropdown('textColor')}
               title="Text Color"
               className="flex flex-col items-center p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
             >
               <span className="text-sm font-bold text-red-500">A</span>
               <div className="w-4 h-1 bg-red-500 rounded-sm"></div>
             </button>
-            {showTextColorPicker && (
+            {activeDropdown === 'textColor' && (
               <div className="absolute top-full left-0 mt-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 p-2 w-56">
                 <div className="grid grid-cols-8 gap-0.5">
-                  {TEXT_COLORS.map(color => (
+                  {TEXT_COLORS.map((color, i) => (
                     <button
-                      key={color}
+                      key={`${color}-${i}`}
                       onClick={() => setTextColor(color)}
                       className="w-6 h-6 rounded border border-gray-200 dark:border-gray-700 hover:scale-110 transition-transform"
                       style={{ backgroundColor: color }}
+                      title={color}
                     />
                   ))}
                 </div>
@@ -467,24 +698,30 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
           </div>
 
           {/* Highlight Color */}
-          <div className="relative" data-dropdown>
+          <div className="relative" data-dropdown="highlightColor">
             <button
-              onClick={() => setShowHighlightPicker(!showHighlightPicker)}
+              onClick={() => toggleDropdown('highlightColor')}
               title="Highlight Color"
               className="flex flex-col items-center p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
             >
               <span className="text-sm font-bold" style={{ backgroundColor: '#ffff00', padding: '0 2px' }}>ab</span>
               <div className="w-4 h-1 bg-yellow-400 rounded-sm"></div>
             </button>
-            {showHighlightPicker && (
+            {activeDropdown === 'highlightColor' && (
               <div className="absolute top-full left-0 mt-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 p-2 w-56">
                 <div className="grid grid-cols-8 gap-0.5">
-                  {HIGHLIGHT_COLORS.map(color => (
+                  {HIGHLIGHT_COLORS.map((color, i) => (
                     <button
-                      key={color}
+                      key={`${color}-${i}`}
                       onClick={() => setHighlightColor(color)}
                       className="w-6 h-6 rounded border border-gray-200 dark:border-gray-700 hover:scale-110 transition-transform"
-                      style={{ backgroundColor: color === 'transparent' ? '#fff' : color, backgroundImage: color === 'transparent' ? 'linear-gradient(45deg, #ccc 25%, transparent 25%, transparent 75%, #ccc 75%), linear-gradient(45deg, #ccc 25%, transparent 25%, transparent 75%, #ccc 75%)' : undefined, backgroundSize: '4px 4px', backgroundPosition: '0 0, 2px 2px' }}
+                      style={{
+                        backgroundColor: color === 'transparent' ? '#fff' : color,
+                        backgroundImage: color === 'transparent' ? 'linear-gradient(45deg, #ccc 25%, transparent 25%, transparent 75%, #ccc 75%), linear-gradient(45deg, #ccc 25%, transparent 25%, transparent 75%, #ccc 75%)' : undefined,
+                        backgroundSize: '4px 4px',
+                        backgroundPosition: '0 0, 2px 2px'
+                      }}
+                      title={color === 'transparent' ? 'No highlight' : color}
                     />
                   ))}
                 </div>
@@ -512,19 +749,19 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
           <ToolbarDivider />
 
-          {/* Insert */}
-          <ToolbarButton icon={Link2} action={() => setModal('insertLink')} title="Insert Link" />
-          <ToolbarButton icon={ImagePlus} action={() => setModal('insertImage')} title="Insert Image" />
-          <ToolbarButton icon={Table2} action={() => setModal('insertTable')} title="Insert Table" />
+          {/* Insert - FIX #4: Use openModal to save selection */}
+          <ToolbarButton icon={Link2} action={() => openModal('insertLink')} title="Insert Link" />
+          <ToolbarButton icon={ImagePlus} action={() => openModal('insertImage')} title="Insert Image" />
+          <ToolbarButton icon={Table2} action={() => openModal('insertTable')} title="Insert Table" />
           <ToolbarButton icon={MinusIcon} action={() => execCommand('insertHTML', '<hr style="border: none; border-top: 2px solid #e5e7eb; margin: 1.5em 0;" />')} title="Horizontal Line" />
-          <ToolbarButton icon={Hash} action={() => setModal('specialChars')} title="Special Characters" />
+          <ToolbarButton icon={Hash} action={() => openModal('specialChars')} title="Special Characters" />
           <ToolbarButton icon={FileMinus2} action={insertPageBreak} title="Page Break" />
 
           <ToolbarDivider />
 
           {/* Line Spacing */}
           <button
-            onClick={() => setModal('lineSpacing')}
+            onClick={() => openModal('lineSpacing')}
             title="Line Spacing"
             className="flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 text-sm"
           >
@@ -532,7 +769,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
           </button>
 
           {/* Find & Replace */}
-          <ToolbarButton icon={Search} action={() => setModal('findReplace')} title="Find & Replace (Ctrl+F)" />
+          <ToolbarButton icon={Search} action={() => openModal('findReplace')} title="Find & Replace (Ctrl+F)" />
 
           <ToolbarDivider />
 
@@ -565,19 +802,17 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         </div>
       )}
 
-      {/* Editor Area */}
+      {/* Editor Area - FIX #10: Remove double scaling */}
       <div className="flex-1 overflow-y-auto bg-gray-200 dark:bg-gray-800 p-4 md:p-8">
         <div
-          className="mx-auto bg-white dark:bg-gray-900 shadow-lg min-h-[1056px] relative"
+          className="mx-auto bg-white dark:bg-gray-900 shadow-lg relative"
           style={{
-            width: `${8.5 * 96 * (zoom / 100)}px`,
+            width: '816px', // Fixed A4 width (8.5 inches * 96px)
             maxWidth: '100%',
             transform: `scale(${zoom / 100})`,
             transformOrigin: 'top center',
           }}
         >
-          {/* Page margin indicators */}
-          <div className="absolute inset-0 pointer-events-none border-l border-r border-transparent" style={{ margin: '0 96px' }}></div>
           <div
             ref={editorRef}
             contentEditable={!readOnly}
@@ -607,12 +842,208 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         </div>
       </div>
 
-      {/* Modals */}
+      {/* Modals - FIX #13: Add overlay click to close */}
+      {modal !== 'none' && modal !== 'findReplace' && (
+        <div 
+          className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) closeModal(); }}
+        >
+          {modal === 'insertImage' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold">Insert Image</h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="p-4 space-y-4">
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">From URL</label>
+                  <div className="flex gap-2">
+                    <input
+                      value={imageUrl}
+                      onChange={(e) => setImageUrl(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && imageUrl && insertImage(imageUrl)}
+                      placeholder="https://example.com/image.jpg"
+                      className="flex-1 text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      autoFocus
+                    />
+                    <button
+                      onClick={() => imageUrl && insertImage(imageUrl)}
+                      className="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm"
+                    >
+                      Insert
+                    </button>
+                  </div>
+                </div>
+                {/* FIX #14: Fixed OR divider */}
+                <OrDivider />
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Upload from device</label>
+                  <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800">
+                    <Upload className="w-8 h-8 text-gray-400 mb-2" />
+                    <span className="text-sm text-gray-500">Click to upload image</span>
+                    <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+                  </label>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {modal === 'insertLink' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold">Insert Link</h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="p-4 space-y-3">
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Display Text</label>
+                  <input
+                    value={linkText}
+                    onChange={(e) => setLinkText(e.target.value)}
+                    placeholder="Link text (optional)"
+                    className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    autoFocus
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">URL</label>
+                  <input
+                    value={linkUrl}
+                    onChange={(e) => setLinkUrl(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && insertLink()}
+                    placeholder="https://example.com"
+                    className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    autoFocus
+                  />
+                </div>
+                <button
+                  onClick={insertLink}
+                  className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium"
+                >
+                  Insert Link
+                </button>
+              </div>
+            </div>
+          )}
+
+          {modal === 'insertTable' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-sm">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold">Insert Table</h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="p-4 space-y-3">
+                <div className="flex gap-3">
+                  <div className="flex-1">
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Rows</label>
+                    <input
+                      type="number"
+                      value={tableRows}
+                      onChange={(e) => setTableRows(Math.min(20, Math.max(1, parseInt(e.target.value) || 1)))}
+                      min="1"
+                      max="20"
+                      className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Columns</label>
+                    <input
+                      type="number"
+                      value={tableCols}
+                      onChange={(e) => setTableCols(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
+                      min="1"
+                      max="10"
+                      className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+                <button
+                  onClick={insertTable}
+                  className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium"
+                >
+                  Insert Table
+                </button>
+              </div>
+            </div>
+          )}
+
+          {modal === 'specialChars' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-lg">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold">Special Characters</h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              {/* FIX #15: Responsive grid */}
+              <div className="p-4 max-h-96 overflow-y-auto">
+                <div className="grid grid-cols-8 sm:grid-cols-10 gap-1">
+                  {SPECIAL_CHARS.map((char, i) => (
+                    <button
+                      key={i}
+                      onClick={() => insertSpecialChar(char)}
+                      className="w-9 h-9 flex items-center justify-center text-lg hover:bg-gray-100 dark:hover:bg-gray-800 rounded border border-gray-200 dark:border-gray-700"
+                      title={char}
+                    >
+                      {char}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {modal === 'lineSpacing' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-sm">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold">Line Spacing</h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              {/* FIX #16: Apply immediately on click */}
+              <div className="p-4 space-y-2">
+                {[1, 1.15, 1.5, 2, 2.5, 3].map(val => (
+                  <button
+                    key={val}
+                    onClick={() => {
+                      setLineSpacingValue(val);
+                      // Apply immediately
+                      if (editorRef.current) {
+                        const blocks = editorRef.current.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, div');
+                        blocks.forEach(el => {
+                          (el as HTMLElement).style.lineHeight = String(val);
+                        });
+                        onChange(editorRef.current.innerHTML);
+                      }
+                    }}
+                    className={`w-full px-3 py-2 rounded text-sm text-left transition-colors ${
+                      lineSpacingValue === val
+                        ? 'bg-blue-500 text-white'
+                        : 'hover:bg-gray-100 dark:hover:bg-gray-800'
+                    }`}
+                  >
+                    {val}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Find & Replace - floating panel */}
       {modal === 'findReplace' && (
         <div className="fixed top-20 right-4 bg-white dark:bg-gray-900 rounded-lg shadow-2xl border border-gray-200 dark:border-gray-700 w-80 z-50">
           <div className="flex items-center justify-between p-3 border-b border-gray-200 dark:border-gray-700">
             <h3 className="font-semibold text-sm">Find & Replace</h3>
-            <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+            <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
               <X className="w-4 h-4" />
             </button>
           </div>
@@ -624,6 +1055,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                 onKeyDown={(e) => e.key === 'Enter' && handleFind()}
                 placeholder="Find..."
                 className="flex-1 text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                autoFocus
               />
               <button onClick={handleFind} className="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm">
                 Find
@@ -634,6 +1066,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
               <input
                 value={replaceText}
                 onChange={(e) => setReplaceText(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleReplace(false)}
                 placeholder="Replace with..."
                 className="flex-1 text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
               />
@@ -644,194 +1077,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
               </button>
               <button onClick={() => handleReplace(true)} className="flex-1 px-3 py-1.5 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-sm">
                 Replace All
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {modal === 'insertImage' && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
-            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="font-semibold">Insert Image</h3>
-              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="p-4 space-y-4">
-              <div>
-                <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">From URL</label>
-                <div className="flex gap-2">
-                  <input
-                    value={imageUrl}
-                    onChange={(e) => setImageUrl(e.target.value)}
-                    placeholder="https://example.com/image.jpg"
-                    className="flex-1 text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                  <button
-                    onClick={() => imageUrl && insertImage(imageUrl)}
-                    className="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm"
-                  >
-                    Insert
-                  </button>
-                </div>
-              </div>
-              <div className="relative">
-                <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-200 dark:border-gray-700"></div></div>
-                <div className="relative flex justify-center"><span className="bg-white dark:bg-gray-900 px-2 text-xs text-gray-500">OR</span></div>
-              </div>
-              <div>
-                <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Upload from device</label>
-                <label className="flex flex-col items-center justify-center w-full h-32 border-2 border-dashed border-gray-300 dark:border-gray-700 rounded-lg cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-800">
-                  <Upload className="w-8 h-8 text-gray-400 mb-2" />
-                  <span className="text-sm text-gray-500">Click to upload image</span>
-                  <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
-                </label>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {modal === 'insertLink' && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
-            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="font-semibold">Insert Link</h3>
-              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="p-4 space-y-3">
-              <div>
-                <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Display Text</label>
-                <input
-                  value={linkText}
-                  onChange={(e) => setLinkText(e.target.value)}
-                  placeholder="Link text (optional)"
-                  className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              <div>
-                <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">URL</label>
-                <input
-                  value={linkUrl}
-                  onChange={(e) => setLinkUrl(e.target.value)}
-                  placeholder="https://example.com"
-                  className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
-                />
-              </div>
-              <button
-                onClick={insertLink}
-                className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium"
-              >
-                Insert Link
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {modal === 'insertTable' && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-sm">
-            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="font-semibold">Insert Table</h3>
-              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="p-4 space-y-3">
-              <div className="flex gap-3">
-                <div className="flex-1">
-                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Rows</label>
-                  <input
-                    type="number"
-                    value={tableRows}
-                    onChange={(e) => setTableRows(parseInt(e.target.value) || 1)}
-                    min="1"
-                    max="20"
-                    className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-                <div className="flex-1">
-                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Columns</label>
-                  <input
-                    type="number"
-                    value={tableCols}
-                    onChange={(e) => setTableCols(parseInt(e.target.value) || 1)}
-                    min="1"
-                    max="10"
-                    className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  />
-                </div>
-              </div>
-              <button
-                onClick={insertTable}
-                className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium"
-              >
-                Insert Table
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {modal === 'specialChars' && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-lg">
-            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="font-semibold">Special Characters</h3>
-              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="p-4 max-h-96 overflow-y-auto">
-              <div className="grid grid-cols-10 gap-1">
-                {SPECIAL_CHARS.map((char, i) => (
-                  <button
-                    key={i}
-                    onClick={() => insertSpecialChar(char)}
-                    className="w-9 h-9 flex items-center justify-center text-lg hover:bg-gray-100 dark:hover:bg-gray-800 rounded border border-gray-200 dark:border-gray-700"
-                  >
-                    {char}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {modal === 'lineSpacing' && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-sm">
-            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-              <h3 className="font-semibold">Line Spacing</h3>
-              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="p-4 space-y-3">
-              {[1, 1.15, 1.5, 2, 2.5, 3].map(val => (
-                <button
-                  key={val}
-                  onClick={() => { setLineSpacingValue(val); }}
-                  className={`w-full px-3 py-2 rounded text-sm text-left ${
-                    lineSpacingValue === val
-                      ? 'bg-blue-500 text-white'
-                      : 'hover:bg-gray-100 dark:hover:bg-gray-800'
-                  }`}
-                >
-                  {val}
-                </button>
-              ))}
-              <button
-                onClick={applyLineSpacing}
-                className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium mt-2"
-              >
-                Apply
               </button>
             </div>
           </div>
