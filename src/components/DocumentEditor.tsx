@@ -17,7 +17,7 @@ import {
   Edit3, Trash2, BarChart3, PieChart, TrendingUp, Globe, Languages,
   FileBarChart, Hash as HashIcon, ListChecks, TextCursorInput,
   AlignVerticalDistributeCenter, CaseSensitive, Wand2, BookOpenCheck,
-  Bookmark, GitCompare, Quote as QuoteIcon
+  Bookmark, GitCompare, Quote as QuoteIcon, Shield, Zap, Accessibility
 } from 'lucide-react';
 import {
   checkGrammar,
@@ -36,6 +36,36 @@ import {
   transformText,
   generateDropCap,
 } from '../utils/documentUtils';
+import {
+  sanitizeHTML,
+  sanitizeURL,
+  validateURL,
+  scanDocumentSecurity,
+  getSecurityScore,
+  AuditLogger,
+  RateLimiter,
+} from '../utils/security';
+import {
+  PerformanceMonitor,
+  debounce,
+  throttle,
+  MemoryCache,
+  compressImage,
+  lazyLoadImages,
+} from '../utils/performance';
+import {
+  runAccessibilityAudit,
+  getAccessibilityScore,
+  trapFocus,
+  announceToScreenReader,
+  setupFocusVisible,
+} from '../utils/accessibility';
+import {
+  detectBrowser,
+  detectFeatures,
+  isBrowserSupported,
+  installPolyfills,
+} from '../utils/browserCompat';
 
 declare global {
   interface Window {
@@ -51,54 +81,6 @@ declare global {
   }
 }
 import { exportDocx } from '../utils/fileHandlers';
-
-// Security utilities
-const sanitizeHTML = (html: string): string => {
-  const tempDiv = document.createElement('div');
-  tempDiv.innerHTML = html;
-  
-  // Remove dangerous elements
-  tempDiv.querySelectorAll('script, iframe, object, embed, form').forEach(el => el.remove());
-  
-  // Remove dangerous attributes
-  tempDiv.querySelectorAll('*').forEach(el => {
-    Array.from(el.attributes).forEach(attr => {
-      const name = attr.name.toLowerCase();
-      // Remove event handlers and dangerous attributes
-      if (name.startsWith('on') || name === 'style' || name === 'class') {
-        el.removeAttribute(attr.name);
-      }
-      // Remove javascript: URLs
-      if ((name === 'href' || name === 'src') && attr.value.toLowerCase().startsWith('javascript:')) {
-        el.removeAttribute(attr.name);
-      }
-    });
-  });
-  
-  return tempDiv.innerHTML;
-};
-
-const sanitizeURL = (url: string): string => {
-  // Remove javascript: and data: URLs
-  if (url.toLowerCase().startsWith('javascript:') || url.toLowerCase().startsWith('data:')) {
-    return '';
-  }
-  // Ensure URL has protocol
-  if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('mailto:')) {
-    return `https://${url}`;
-  }
-  return url;
-};
-
-const validateURL = (url: string): boolean => {
-  try {
-    const sanitized = sanitizeURL(url);
-    new URL(sanitized);
-    return true;
-  } catch {
-    return false;
-  }
-};
 
 // Error Boundary Component
 class ErrorBoundary extends React.Component<
