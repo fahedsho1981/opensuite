@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useMemo, useCallback } from 'react';
 import {
   Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight, AlignJustify,
   List, ListOrdered, Undo, Redo,
@@ -11,7 +11,9 @@ import {
   FileMinus2, Hash, ChevronUp, ChevronDown as ChevronDownIcon,
   MessageSquare, Eye, EyeOff, Lock, Unlock, History, Users,
   BookOpen, Clock, Target, Sparkles, Droplet, Type,
-  PenTool, Palette, FileCheck, Share2, Cloud, Mail, Code, Plus, Settings
+  PenTool, Palette, FileCheck, Share2, Cloud, Mail, Code, Plus, Settings,
+  Keyboard, HelpCircle, AlertCircle, CheckCircle, Info, ExternalLink,
+  Scissors, Copy as CopyIcon, Clipboard as ClipboardIcon
 } from 'lucide-react';
 
 declare global {
@@ -28,6 +30,129 @@ declare global {
   }
 }
 import { exportDocx } from '../utils/fileHandlers';
+
+// Security utilities
+const sanitizeHTML = (html: string): string => {
+  const tempDiv = document.createElement('div');
+  tempDiv.innerHTML = html;
+  
+  // Remove dangerous elements
+  tempDiv.querySelectorAll('script, iframe, object, embed, form').forEach(el => el.remove());
+  
+  // Remove dangerous attributes
+  tempDiv.querySelectorAll('*').forEach(el => {
+    Array.from(el.attributes).forEach(attr => {
+      const name = attr.name.toLowerCase();
+      // Remove event handlers and dangerous attributes
+      if (name.startsWith('on') || name === 'style' || name === 'class') {
+        el.removeAttribute(attr.name);
+      }
+      // Remove javascript: URLs
+      if ((name === 'href' || name === 'src') && attr.value.toLowerCase().startsWith('javascript:')) {
+        el.removeAttribute(attr.name);
+      }
+    });
+  });
+  
+  return tempDiv.innerHTML;
+};
+
+const sanitizeURL = (url: string): string => {
+  // Remove javascript: and data: URLs
+  if (url.toLowerCase().startsWith('javascript:') || url.toLowerCase().startsWith('data:')) {
+    return '';
+  }
+  // Ensure URL has protocol
+  if (!url.startsWith('http://') && !url.startsWith('https://') && !url.startsWith('mailto:')) {
+    return `https://${url}`;
+  }
+  return url;
+};
+
+const validateURL = (url: string): boolean => {
+  try {
+    const sanitized = sanitizeURL(url);
+    new URL(sanitized);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+// Error Boundary Component
+class ErrorBoundary extends React.Component<
+  { children: React.ReactNode; fallback?: React.ReactNode },
+  { hasError: boolean; error: Error | null }
+> {
+  constructor(props: { children: React.ReactNode; fallback?: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    console.error('DocumentEditor Error:', error, errorInfo);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback || (
+        <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-lg">
+          <div className="flex items-center gap-2 text-red-600 dark:text-red-400 mb-2">
+            <AlertCircle className="w-5 h-5" />
+            <h3 className="font-semibold">Something went wrong</h3>
+          </div>
+          <p className="text-sm text-red-500 dark:text-red-300 mb-3">
+            {this.state.error?.message || 'An unexpected error occurred'}
+          </p>
+          <button
+            onClick={() => this.setState({ hasError: false, error: null })}
+            className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded text-sm"
+          >
+            Try Again
+          </button>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+// Toast notification component
+interface Toast {
+  id: string;
+  message: string;
+  type: 'success' | 'error' | 'info' | 'warning';
+}
+
+const ToastContainer = ({ toasts, onRemove }: { toasts: Toast[]; onRemove: (id: string) => void }) => (
+  <div className="fixed bottom-4 right-4 z-50 space-y-2">
+    {toasts.map(toast => (
+      <div
+        key={toast.id}
+        className={`flex items-center gap-2 px-4 py-3 rounded-lg shadow-lg animate-slide-in ${
+          toast.type === 'success' ? 'bg-green-500 text-white' :
+          toast.type === 'error' ? 'bg-red-500 text-white' :
+          toast.type === 'warning' ? 'bg-yellow-500 text-white' :
+          'bg-blue-500 text-white'
+        }`}
+      >
+        {toast.type === 'success' && <CheckCircle className="w-5 h-5" />}
+        {toast.type === 'error' && <AlertCircle className="w-5 h-5" />}
+        {toast.type === 'warning' && <AlertCircle className="w-5 h-5" />}
+        {toast.type === 'info' && <Info className="w-5 h-5" />}
+        <span className="text-sm font-medium">{toast.message}</span>
+        <button onClick={() => onRemove(toast.id)} className="ml-2 hover:opacity-70">
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+    ))}
+  </div>
+);
 
 interface DocumentEditorProps {
   content: string;
@@ -99,7 +224,7 @@ const THESAURUS: Record<string, string[]> = {
   'ugly': ['hideous', 'unsightly', 'unattractive', 'homely', 'grotesque', 'repulsive'],
 };
 
-type ModalType = 'none' | 'findReplace' | 'insertImage' | 'specialChars' | 'lineSpacing' | 'insertTable' | 'insertLink' | 'headersFooters' | 'tableOfContents' | 'trackChanges' | 'comments' | 'spellCheck' | 'grammarCheck' | 'thesaurus' | 'wordCountGoals' | 'autoSave' | 'versionHistory' | 'collaboration' | 'templates' | 'mailMerge' | 'macros' | 'addIns' | 'cloudStorage' | 'documentProtection' | 'footnotes' | 'columns' | 'textBoxes' | 'shapes' | 'charts' | 'wordArt' | 'watermarks';
+type ModalType = 'none' | 'findReplace' | 'insertImage' | 'specialChars' | 'lineSpacing' | 'insertTable' | 'insertLink' | 'headersFooters' | 'tableOfContents' | 'trackChanges' | 'comments' | 'spellCheck' | 'grammarCheck' | 'thesaurus' | 'wordCountGoals' | 'autoSave' | 'versionHistory' | 'collaboration' | 'templates' | 'mailMerge' | 'macros' | 'addIns' | 'cloudStorage' | 'documentProtection' | 'footnotes' | 'columns' | 'textBoxes' | 'shapes' | 'charts' | 'wordArt' | 'watermarks' | 'pageSetup';
 type ActiveDropdown = 'none' | 'font' | 'textColor' | 'highlightColor';
 
 interface Comment {
@@ -211,6 +336,36 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   // Feature 49: Watermarks
   const [watermarkText, setWatermarkText] = useState('');
   const [showWatermark, setShowWatermark] = useState(false);
+
+  // NEW: Toast notifications
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const addToast = useCallback((message: string, type: Toast['type'] = 'info') => {
+    const id = Date.now().toString();
+    setToasts(prev => [...prev, { id, message, type }]);
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3000);
+  }, []);
+  const removeToast = useCallback((id: string) => {
+    setToasts(prev => prev.filter(t => t.id !== id));
+  }, []);
+
+  // NEW: Keyboard shortcuts help
+  const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
+
+  // NEW: Context menu
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
+
+  // NEW: Loading state
+  const [isLoading, setIsLoading] = useState(false);
+
+  // NEW: Page setup
+  const [pageSetup, setPageSetup] = useState({
+    margins: { top: 96, right: 96, bottom: 96, left: 96 },
+    orientation: 'portrait' as 'portrait' | 'landscape',
+    paperSize: 'letter' as 'letter' | 'a4' | 'legal',
+  });
+
+  // NEW: Zoom presets
+  const [zoomInput, setZoomInput] = useState('100');
 
   // Feature 56: Reading time
   const readingTime = useMemo(() => {
@@ -326,6 +481,56 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     }
   };
 
+  // Debounced input handler for performance
+  const debouncedHandleInput = useMemo(() => {
+    let timeoutId: NodeJS.Timeout;
+    return () => {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => {
+        handleInput();
+      }, 300);
+    };
+  }, []);
+
+  // Drag and drop support for images
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files);
+    const imageFiles = files.filter(f => f.type.startsWith('image/'));
+    
+    if (imageFiles.length > 0) {
+      imageFiles.forEach(file => {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          if (ev.target?.result) {
+            insertImage(ev.target.result as string);
+          }
+        };
+        reader.readAsDataURL(file);
+      });
+      addToast(`${imageFiles.length} image(s) inserted`, 'success');
+    }
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+  }, []);
+
+  // Context menu handler
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
+
+  // Close context menu on click outside
+  useEffect(() => {
+    const handleClick = () => setContextMenu(null);
+    if (contextMenu) {
+      document.addEventListener('click', handleClick);
+      return () => document.removeEventListener('click', handleClick);
+    }
+  }, [contextMenu]);
+
   const handleExport = async () => {
     if (editorRef.current) {
       await exportDocx(editorRef.current.innerHTML, fileName);
@@ -362,10 +567,17 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   };
 
   const insertImage = (src: string) => {
+    // Validate and sanitize image URL
+    if (!src.startsWith('data:') && !validateURL(src)) {
+      addToast('Invalid image URL', 'error');
+      return;
+    }
+    const safeSrc = src.startsWith('data:') ? src : sanitizeURL(src);
     restoreSelection();
-    execCommand('insertHTML', `<img src="${src}" style="max-width: 100%; height: auto; margin: 1em 0; border-radius: 4px; display: block;" />`);
+    execCommand('insertHTML', `<img src="${safeSrc}" alt="Image" style="max-width: 100%; height: auto; margin: 1em 0; border-radius: 4px; display: block;" />`);
     closeModal();
     setImageUrl('');
+    addToast('Image inserted', 'success');
   };
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -383,13 +595,19 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   const insertLink = () => {
     if (linkUrl) {
+      // Validate and sanitize URL
+      if (!validateURL(linkUrl)) {
+        addToast('Invalid URL', 'error');
+        return;
+      }
+      const safeUrl = sanitizeURL(linkUrl);
+      const safeText = (linkText || linkUrl).replace(/[<>"']/g, '');
       restoreSelection();
-      const displayText = linkText || linkUrl;
-      const safeUrl = linkUrl.startsWith('http') ? linkUrl : `https://${linkUrl}`;
-      execCommand('insertHTML', `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${displayText}</a>`);
+      execCommand('insertHTML', `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${safeText}</a>`);
       closeModal();
       setLinkUrl('');
       setLinkText('');
+      addToast('Link inserted', 'success');
     }
   };
 
@@ -701,12 +919,15 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       if (e.key === 'Escape') {
         if (modal !== 'none') closeModal();
         setActiveDropdown('none');
+        setContextMenu(null);
+        setShowShortcutsHelp(false);
       }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey) {
         switch (e.key.toLowerCase()) {
           case 'f': e.preventDefault(); openModal('findReplace'); break;
           case 'p': e.preventDefault(); handlePrint(); break;
           case 's': e.preventDefault(); handleSave(); break;
+          case '/': e.preventDefault(); setShowShortcutsHelp(true); break;
           case 'b':
             if (document.activeElement === editorRef.current || editorRef.current?.contains(document.activeElement)) {
               e.preventDefault();
@@ -788,11 +1009,13 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       onClick={() => { saveSelection(); action(); }}
       disabled={readOnly}
       title={title}
-      className={`p-1.5 rounded transition-colors disabled:opacity-50 ${
+      aria-label={title}
+      aria-pressed={active}
+      className={`p-1.5 rounded transition-colors disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-500 ${
         active ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-600 dark:text-blue-400' : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white'
       }`}
     >
-      <Icon className="w-4 h-4" />
+      <Icon className="w-4 h-4" aria-hidden="true" />
     </button>
   );
 
@@ -810,6 +1033,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   );
 
   return (
+    <ErrorBoundary>
     <div className="flex flex-col h-full bg-gray-100 dark:bg-gray-800">
       {/* Top Menu Bar */}
       <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-3 py-1.5 flex items-center gap-1 text-sm overflow-x-auto">
@@ -859,6 +1083,10 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         <button onClick={() => openModal('templates')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Templates</button>
         <button onClick={() => openModal('documentProtection')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Protect</button>
         <button onClick={() => openModal('cloudStorage')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Cloud</button>
+        <button onClick={() => openModal('pageSetup')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Page Setup</button>
+        <button onClick={() => setShowShortcutsHelp(true)} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Keyboard className="w-3.5 h-3.5" /> Shortcuts
+        </button>
         
         <div className="flex-1" />
         <button onClick={handleSave} title="Save (Ctrl+S)" className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
@@ -1076,7 +1304,12 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       )}
 
       {/* Editor Area */}
-      <div className="flex-1 overflow-y-auto bg-gray-200 dark:bg-gray-800 p-4 md:p-8 relative">
+      <div 
+        className="flex-1 overflow-y-auto bg-gray-200 dark:bg-gray-800 p-4 md:p-8 relative"
+        onDrop={handleDrop}
+        onDragOver={handleDragOver}
+        onContextMenu={handleContextMenu}
+      >
         {/* Feature 49: Watermark */}
         {showWatermark && watermarkText && (
           <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-0">
@@ -1086,13 +1319,24 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
           </div>
         )}
         
+        {/* Loading overlay */}
+        {isLoading && (
+          <div className="absolute inset-0 bg-white/80 dark:bg-gray-900/80 flex items-center justify-center z-50">
+            <div className="text-center">
+              <div className="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4"></div>
+              <p className="text-gray-600 dark:text-gray-400">Loading...</p>
+            </div>
+          </div>
+        )}
+        
         <div
           className="mx-auto bg-white dark:bg-gray-900 shadow-lg relative z-10"
           style={{
-            width: `${PAGE_WIDTH_A4}px`,
+            width: pageSetup.orientation === 'landscape' ? `${PAGE_HEIGHT_A4}px` : `${PAGE_WIDTH_A4}px`,
             maxWidth: '100%',
             transform: `scale(${zoom / 100})`,
             transformOrigin: 'top center',
+            padding: `${pageSetup.margins.top}px ${pageSetup.margins.right}px ${pageSetup.margins.bottom}px ${pageSetup.margins.left}px`,
           }}
         >
           {/* Feature 41: Header */}
@@ -1106,9 +1350,13 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             ref={editorRef}
             contentEditable={!readOnly && !documentProtected}
             onInput={handleInput}
-            className="prose prose-lg dark:prose-invert max-w-none p-16 md:p-24 min-h-[1056px] focus:outline-none"
+            className="prose prose-lg dark:prose-invert max-w-none p-16 md:p-24 min-h-[1056px] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
             suppressContentEditableWarning
             style={{ lineHeight: '1.8' }}
+            role="textbox"
+            aria-multiline="true"
+            aria-label="Document editor"
+            aria-readonly={readOnly || documentProtected}
           />
           
           {/* Feature 41: Footer */}
@@ -1170,13 +1418,41 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         
         <div className="flex-1" />
         <div className="flex items-center gap-1">
-          <button onClick={() => setZoom(Math.max(50, zoom - 10))} className="p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+          <button onClick={() => setZoom(Math.max(50, zoom - 10))} className="p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded" aria-label="Zoom out">
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
-          <span className="min-w-[40px] text-center">{zoom}%</span>
-          <button onClick={() => setZoom(Math.min(200, zoom + 10))} className="p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+          <input
+            type="number"
+            value={zoomInput}
+            onChange={(e) => {
+              setZoomInput(e.target.value);
+              const value = parseInt(e.target.value);
+              if (!isNaN(value) && value >= 50 && value <= 200) {
+                setZoom(value);
+              }
+            }}
+            onBlur={() => setZoomInput(String(zoom))}
+            className="w-14 text-center text-xs border border-gray-200 dark:border-gray-700 rounded px-1 py-0.5 bg-white dark:bg-gray-900"
+            min="50"
+            max="200"
+            aria-label="Zoom percentage"
+          />
+          <button onClick={() => setZoom(Math.min(200, zoom + 10))} className="p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded" aria-label="Zoom in">
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
+          {/* Zoom presets */}
+          <div className="flex gap-0.5 ml-2">
+            {[50, 75, 100, 125, 150, 200].map(preset => (
+              <button
+                key={preset}
+                onClick={() => { setZoom(preset); setZoomInput(String(preset)); }}
+                className={`px-1.5 py-0.5 text-xs rounded ${zoom === preset ? 'bg-blue-500 text-white' : 'hover:bg-gray-100 dark:hover:bg-gray-800'}`}
+                aria-label={`Zoom to ${preset}%`}
+              >
+                {preset}%
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -1651,6 +1927,89 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
               </div>
             </div>
           )}
+
+          {/* Page Setup Modal */}
+          {modal === 'pageSetup' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold">Page Setup</h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 space-y-4">
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Orientation</label>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setPageSetup({ ...pageSetup, orientation: 'portrait' })}
+                      className={`flex-1 px-3 py-2 rounded border-2 ${pageSetup.orientation === 'portrait' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 dark:border-gray-700'}`}
+                    >
+                      Portrait
+                    </button>
+                    <button
+                      onClick={() => setPageSetup({ ...pageSetup, orientation: 'landscape' })}
+                      className={`flex-1 px-3 py-2 rounded border-2 ${pageSetup.orientation === 'landscape' ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 dark:border-gray-700'}`}
+                    >
+                      Landscape
+                    </button>
+                  </div>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Paper Size</label>
+                  <select
+                    value={pageSetup.paperSize}
+                    onChange={(e) => setPageSetup({ ...pageSetup, paperSize: e.target.value as any })}
+                    className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-white dark:bg-gray-900"
+                  >
+                    <option value="letter">Letter (8.5" × 11")</option>
+                    <option value="a4">A4 (210mm × 297mm)</option>
+                    <option value="legal">Legal (8.5" × 14")</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Margins (pixels)</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="text-xs text-gray-500">Top</label>
+                      <input
+                        type="number"
+                        value={pageSetup.margins.top}
+                        onChange={(e) => setPageSetup({ ...pageSetup, margins: { ...pageSetup.margins, top: parseInt(e.target.value) || 0 } })}
+                        className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1 bg-transparent"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500">Bottom</label>
+                      <input
+                        type="number"
+                        value={pageSetup.margins.bottom}
+                        onChange={(e) => setPageSetup({ ...pageSetup, margins: { ...pageSetup.margins, bottom: parseInt(e.target.value) || 0 } })}
+                        className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1 bg-transparent"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500">Left</label>
+                      <input
+                        type="number"
+                        value={pageSetup.margins.left}
+                        onChange={(e) => setPageSetup({ ...pageSetup, margins: { ...pageSetup.margins, left: parseInt(e.target.value) || 0 } })}
+                        className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1 bg-transparent"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-gray-500">Right</label>
+                      <input
+                        type="number"
+                        value={pageSetup.margins.right}
+                        onChange={(e) => setPageSetup({ ...pageSetup, margins: { ...pageSetup.margins, right: parseInt(e.target.value) || 0 } })}
+                        className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1 bg-transparent"
+                      />
+                    </div>
+                  </div>
+                </div>
+                <button onClick={() => { closeModal(); addToast('Page setup applied', 'success'); }} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Apply</button>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -1687,6 +2046,114 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
           </div>
         </div>
       )}
+
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          className="fixed bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl py-1 z-50 min-w-[180px]"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+        >
+          <button
+            onClick={() => { execCommand('cut'); setContextMenu(null); }}
+            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+          >
+            <Scissors className="w-4 h-4" /> Cut
+          </button>
+          <button
+            onClick={() => { execCommand('copy'); setContextMenu(null); }}
+            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+          >
+            <CopyIcon className="w-4 h-4" /> Copy
+          </button>
+          <button
+            onClick={() => { execCommand('paste'); setContextMenu(null); }}
+            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+          >
+            <ClipboardIcon className="w-4 h-4" /> Paste
+          </button>
+          <div className="border-t border-gray-200 dark:border-gray-700 my-1"></div>
+          <button
+            onClick={() => { execCommand('selectAll'); setContextMenu(null); }}
+            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800"
+          >
+            Select All
+          </button>
+          <button
+            onClick={() => { clearFormatting(); setContextMenu(null); }}
+            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+          >
+            <Eraser className="w-4 h-4" /> Clear Formatting
+          </button>
+          <div className="border-t border-gray-200 dark:border-gray-700 my-1"></div>
+          <button
+            onClick={() => { openModal('insertLink'); setContextMenu(null); }}
+            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+          >
+            <Link2 className="w-4 h-4" /> Insert Link
+          </button>
+          <button
+            onClick={() => { openModal('insertImage'); setContextMenu(null); }}
+            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+          >
+            <ImagePlus className="w-4 h-4" /> Insert Image
+          </button>
+        </div>
+      )}
+
+      {/* Keyboard Shortcuts Help Modal */}
+      {showShortcutsHelp && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={() => setShowShortcutsHelp(false)}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-900">
+              <h3 className="font-semibold flex items-center gap-2">
+                <Keyboard className="w-5 h-5" />
+                Keyboard Shortcuts
+              </h3>
+              <button onClick={() => setShowShortcutsHelp(false)} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <h4 className="font-medium text-sm mb-2 text-gray-700 dark:text-gray-300">General</h4>
+                <div className="space-y-1 text-sm">
+                  <div className="flex justify-between"><span>Save</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Ctrl+S</kbd></div>
+                  <div className="flex justify-between"><span>Print</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Ctrl+P</kbd></div>
+                  <div className="flex justify-between"><span>Find & Replace</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Ctrl+F</kbd></div>
+                  <div className="flex justify-between"><span>Keyboard Shortcuts</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Ctrl+/</kbd></div>
+                </div>
+              </div>
+              <div>
+                <h4 className="font-medium text-sm mb-2 text-gray-700 dark:text-gray-300">Formatting</h4>
+                <div className="space-y-1 text-sm">
+                  <div className="flex justify-between"><span>Bold</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Ctrl+B</kbd></div>
+                  <div className="flex justify-between"><span>Italic</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Ctrl+I</kbd></div>
+                  <div className="flex justify-between"><span>Underline</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Ctrl+U</kbd></div>
+                </div>
+              </div>
+              <div>
+                <h4 className="font-medium text-sm mb-2 text-gray-700 dark:text-gray-300">Editing</h4>
+                <div className="space-y-1 text-sm">
+                  <div className="flex justify-between"><span>Undo</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Ctrl+Z</kbd></div>
+                  <div className="flex justify-between"><span>Redo</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Ctrl+Y</kbd></div>
+                  <div className="flex justify-between"><span>Select All</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Ctrl+A</kbd></div>
+                </div>
+              </div>
+              <div>
+                <h4 className="font-medium text-sm mb-2 text-gray-700 dark:text-gray-300">Navigation</h4>
+                <div className="space-y-1 text-sm">
+                  <div className="flex justify-between"><span>Close Modal</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Esc</kbd></div>
+                  <div className="flex justify-between"><span>Find Next</span><kbd className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded text-xs">Enter</kbd></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Toast Notifications */}
+      <ToastContainer toasts={toasts} onRemove={removeToast} />
     </div>
+    </ErrorBoundary>
   );
 }
