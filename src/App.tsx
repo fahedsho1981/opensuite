@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, Component, ErrorInfo, ReactNode } from 'react';
 import Sidebar from './components/Sidebar';
 import DocumentEditor from './components/DocumentEditor';
 import SpreadsheetEditor from './components/SpreadsheetEditor';
@@ -10,8 +10,93 @@ import { createNewFile, getFileIcon } from './utils/fileHandlers';
 import IntegrationPanel from './components/IntegrationPanel';
 import {
   FileText, FileSpreadsheet, Presentation, FileCode, File,
-  Menu, Eye, Edit3, Maximize2, Minimize2, Globe
+  Menu, Eye, Edit3, Maximize2, Minimize2, Globe, AlertCircle, RefreshCw
 } from 'lucide-react';
+
+// Error Boundary Component
+interface ErrorBoundaryProps {
+  children: ReactNode;
+  fallback?: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class AppErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error('Application Error:', error, errorInfo);
+    
+    // Log to error tracking service
+    try {
+      localStorage.setItem('last_error', JSON.stringify({
+        message: error.message,
+        stack: error.stack,
+        componentStack: errorInfo.componentStack,
+        timestamp: new Date().toISOString(),
+      }));
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      if (this.props.fallback) {
+        return this.props.fallback;
+      }
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
+          <div className="max-w-md w-full bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <AlertCircle className="w-8 h-8 text-red-500" />
+              <h2 className="text-xl font-bold text-gray-900 dark:text-white">Something went wrong</h2>
+            </div>
+            <p className="text-gray-600 dark:text-gray-400 mb-4">
+              We're sorry, but the application encountered an unexpected error.
+            </p>
+            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded p-3 mb-4">
+              <p className="text-sm text-red-800 dark:text-red-200 font-mono">
+                {this.state.error?.message || 'Unknown error'}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => this.setState({ hasError: false, error: null })}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Try Again
+              </button>
+              <button
+                onClick={() => window.location.reload()}
+                className="flex-1 px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg font-medium transition-colors"
+              >
+                Reload Page
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 dark:text-gray-400 mt-4 text-center">
+              If the problem persists, please contact support.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 function App() {
   const [files, setFiles] = useState<OfficeFile[]>(() => {
@@ -405,4 +490,11 @@ OpenSuite can be embedded in other applications:
   );
 }
 
-export default App;
+// Wrap App with Error Boundary
+export default function AppWithBoundary() {
+  return (
+    <AppErrorBoundary>
+      <App />
+    </AppErrorBoundary>
+  );
+}

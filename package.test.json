@@ -1,0 +1,21 @@
+{
+  "name": "opensuite-tests",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.1.5",
+    "@testing-library/react": "^14.1.2",
+    "@testing-library/user-event": "^14.5.1",
+    "@vitest/coverage-v8": "^1.0.4",
+    "@vitest/ui": "^1.0.4",
+    "@playwright/test": "^1.40.1",
+    "vitest": "^1.0.4",
+    "jsdom": "^23.0.1"
+  }
+}
