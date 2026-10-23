@@ -972,12 +972,12 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   const insertTable = () => {
     restoreSelection();
-    let table = '<table style="border-collapse: collapse; width: 100%; margin: 1em 0;"><tbody>';
+    let table = '<table style="border-collapse: collapse; width: 100%; margin: 1em 0;" data-table-id="' + Date.now() + '"><tbody>';
     for (let r = 0; r < tableRows; r++) {
       table += '<tr>';
       for (let c = 0; c < tableCols; c++) {
         const tag = r === 0 ? 'th' : 'td';
-        table += `<${tag} style="border: 1px solid #d1d5db; padding: 8px 12px; min-width: 80px;${r === 0 ? ' background-color: #f3f4f6; font-weight: 600;' : ''}">&nbsp;</${tag}>`;
+        table += `<${tag} style="border: 1px solid #d1d5db; padding: 8px 12px; min-width: 80px;${r === 0 ? ' background-color: #f3f4f6; font-weight: 600;' : ''}" data-cell-id="${r}-${c}">&nbsp;</${tag}>`;
       }
       table += '</tr>';
     }
@@ -985,6 +985,197 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     execCommand('insertHTML', table);
     closeModal();
   };
+
+  // Table editing functions
+  const getSelectedTableCell = (): HTMLTableCellElement | null => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) return null;
+    
+    const node = selection.anchorNode;
+    if (!node) return null;
+    
+    let current: Node | null = node;
+    while (current && current !== editorRef.current) {
+      if (current instanceof HTMLTableCellElement) {
+        return current;
+      }
+      current = current.parentNode;
+    }
+    return null;
+  };
+
+  const getSelectedTable = (): HTMLTableElement | null => {
+    const cell = getSelectedTableCell();
+    return cell ? cell.closest('table') : null;
+  };
+
+  const addTableRow = (position: 'above' | 'below') => {
+    const cell = getSelectedTableCell();
+    if (!cell) return;
+    
+    const row = cell.closest('tr');
+    if (!row) return;
+    
+    const table = row.closest('table');
+    if (!table) return;
+    
+    const newRow = document.createElement('tr');
+    const colCount = row.cells.length;
+    
+    for (let i = 0; i < colCount; i++) {
+      const newCell = document.createElement('td');
+      newCell.style.cssText = 'border: 1px solid #d1d5db; padding: 8px 12px; min-width: 80px;';
+      newCell.innerHTML = '&nbsp;';
+      newRow.appendChild(newCell);
+    }
+    
+    if (position === 'above') {
+      row.parentNode?.insertBefore(newRow, row);
+    } else {
+      row.parentNode?.insertBefore(newRow, row.nextSibling);
+    }
+    
+    if (editorRef.current) {
+      onChange(editorRef.current.innerHTML);
+    }
+    addToast(`Row added ${position}`, 'success');
+  };
+
+  const addTableColumn = (position: 'left' | 'right') => {
+    const cell = getSelectedTableCell();
+    if (!cell) return;
+    
+    const table = cell.closest('table');
+    if (!table) return;
+    
+    const cellIndex = Array.from(cell.parentNode!.children).indexOf(cell);
+    const rows = table.querySelectorAll('tr');
+    
+    rows.forEach(row => {
+      const newCell = document.createElement(row.cells[0]?.tagName === 'TH' ? 'th' : 'td');
+      newCell.style.cssText = 'border: 1px solid #d1d5db; padding: 8px 12px; min-width: 80px;';
+      newCell.innerHTML = '&nbsp;';
+      
+      if (position === 'left') {
+        row.insertBefore(newCell, row.cells[cellIndex]);
+      } else {
+        row.insertBefore(newCell, row.cells[cellIndex + 1]);
+      }
+    });
+    
+    if (editorRef.current) {
+      onChange(editorRef.current.innerHTML);
+    }
+    addToast(`Column added ${position}`, 'success');
+  };
+
+  const deleteTableRow = () => {
+    const cell = getSelectedTableCell();
+    if (!cell) return;
+    
+    const row = cell.closest('tr');
+    if (!row) return;
+    
+    const table = row.closest('table');
+    if (!table) return;
+    
+    // Don't delete if it's the last row
+    if (table.querySelectorAll('tr').length <= 1) {
+      addToast('Cannot delete the last row', 'warning');
+      return;
+    }
+    
+    row.remove();
+    
+    if (editorRef.current) {
+      onChange(editorRef.current.innerHTML);
+    }
+    addToast('Row deleted', 'success');
+  };
+
+  const deleteTableColumn = () => {
+    const cell = getSelectedTableCell();
+    if (!cell) return;
+    
+    const table = cell.closest('table');
+    if (!table) return;
+    
+    const cellIndex = Array.from(cell.parentNode!.children).indexOf(cell);
+    
+    // Don't delete if it's the last column
+    if (table.querySelectorAll('tr')[0].cells.length <= 1) {
+      addToast('Cannot delete the last column', 'warning');
+      return;
+    }
+    
+    const rows = table.querySelectorAll('tr');
+    rows.forEach(row => {
+      if (row.cells[cellIndex]) {
+        row.cells[cellIndex].remove();
+      }
+    });
+    
+    if (editorRef.current) {
+      onChange(editorRef.current.innerHTML);
+    }
+    addToast('Column deleted', 'success');
+  };
+
+  const deleteTable = () => {
+    const table = getSelectedTable();
+    if (!table) return;
+    
+    if (window.confirm('Delete entire table?')) {
+      table.remove();
+      if (editorRef.current) {
+        onChange(editorRef.current.innerHTML);
+      }
+      addToast('Table deleted', 'success');
+    }
+  };
+
+  const setCellBackgroundColor = (color: string) => {
+    const cell = getSelectedTableCell();
+    if (!cell) return;
+    
+    cell.style.backgroundColor = color;
+    
+    if (editorRef.current) {
+      onChange(editorRef.current.innerHTML);
+    }
+    addToast('Cell background color applied', 'success');
+  };
+
+  const clearCellBackgroundColor = () => {
+    const cell = getSelectedTableCell();
+    if (!cell) return;
+    
+    cell.style.backgroundColor = '';
+    
+    if (editorRef.current) {
+      onChange(editorRef.current.innerHTML);
+    }
+    addToast('Cell background color cleared', 'success');
+  };
+
+  // Table selection state
+  const [selectedTableCell, setSelectedTableCell] = useState<HTMLTableCellElement | null>(null);
+  const [showTableToolbar, setShowTableToolbar] = useState(false);
+  const [showCellColorPicker, setShowCellColorPicker] = useState(false);
+
+  // Update table selection on cursor movement
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      const cell = getSelectedTableCell();
+      if (cell !== selectedTableCell) {
+        setSelectedTableCell(cell);
+        setShowTableToolbar(!!cell);
+      }
+    };
+
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => document.removeEventListener('selectionchange', handleSelectionChange);
+  }, [selectedTableCell]);
 
   const insertPageBreak = () => {
     execCommand('insertHTML', '<div style="page-break-after: always; border-top: 2px dashed #9ca3af; margin: 2em 0; padding-top: 4px;"><span style="font-size: 10px; color: #9ca3af;">— Page Break —</span></div><p><br></p>');
@@ -1699,6 +1890,74 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
           <ToolbarButton icon={RulerIcon} action={() => setShowRuler(!showRuler)} title="Toggle Ruler" active={showRuler} />
         </div>
       </div>
+
+      {/* Table Editing Toolbar - Shows when cursor is in a table */}
+      {showTableToolbar && selectedTableCell && (
+        <div className="bg-blue-50 dark:bg-blue-900/20 border-b border-blue-200 dark:border-blue-800 px-2 py-1.5">
+          <div className="flex items-center gap-0.5 flex-wrap">
+            <span className="text-xs font-medium text-blue-700 dark:text-blue-300 mr-2">Table:</span>
+            
+            {/* Row Operations */}
+            <ToolbarButton icon={Plus} action={() => addTableRow('above')} title="Add Row Above" />
+            <ToolbarButton icon={Plus} action={() => addTableRow('below')} title="Add Row Below" />
+            <ToolbarButton icon={Trash2} action={deleteTableRow} title="Delete Row" />
+            
+            <ToolbarDivider />
+            
+            {/* Column Operations */}
+            <ToolbarButton icon={Plus} action={() => addTableColumn('left')} title="Add Column Left" />
+            <ToolbarButton icon={Plus} action={() => addTableColumn('right')} title="Add Column Right" />
+            <ToolbarButton icon={Trash2} action={deleteTableColumn} title="Delete Column" />
+            
+            <ToolbarDivider />
+            
+            {/* Cell Formatting */}
+            <div className="relative" data-dropdown>
+              <button
+                onClick={() => setShowCellColorPicker(!showCellColorPicker)}
+                title="Cell Background Color"
+                className="flex items-center gap-1 px-2 py-1 rounded hover:bg-blue-100 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300 text-sm"
+              >
+                <Palette className="w-4 h-4" />
+                <span className="text-xs">Cell Color</span>
+                <ChevronDown className="w-3 h-3" />
+              </button>
+              {showCellColorPicker && (
+                <div className="absolute top-full left-0 mt-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 p-2 w-56">
+                  <button
+                    onClick={() => {
+                      clearCellBackgroundColor();
+                      setShowCellColorPicker(false);
+                    }}
+                    className="w-full text-left px-2 py-1 text-xs hover:bg-gray-100 dark:hover:bg-gray-800 rounded mb-1"
+                  >
+                    Clear Background
+                  </button>
+                  <div className="grid grid-cols-8 gap-0.5">
+                    {TEXT_COLORS.map((color, i) => (
+                      <button
+                        key={`cell-${color}-${i}`}
+                        onClick={() => {
+                          setCellBackgroundColor(color);
+                          setShowCellColorPicker(false);
+                        }}
+                        className="w-6 h-6 rounded border border-gray-200 dark:border-gray-700 hover:scale-110 transition-transform"
+                        style={{ backgroundColor: color }}
+                        title={color}
+                      />
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            
+            <ToolbarDivider />
+            
+            {/* Table Operations */}
+            <ToolbarButton icon={Trash2} action={deleteTable} title="Delete Table" />
+          </div>
+        </div>
+      )}
 
       {/* Feature 41: Headers/Footers */}
       {showHeaders && (
@@ -2971,9 +3230,10 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       {/* Context Menu */}
       {contextMenu && (
         <div
-          className="fixed bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl py-1 z-50 min-w-[180px]"
+          className="fixed bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-xl py-1 z-50 min-w-[200px]"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
+          {/* Standard context menu items */}
           <button
             onClick={() => { execCommand('cut'); setContextMenu(null); }}
             className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
@@ -3005,19 +3265,83 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
           >
             <Eraser className="w-4 h-4" /> Clear Formatting
           </button>
-          <div className="border-t border-gray-200 dark:border-gray-700 my-1"></div>
-          <button
-            onClick={() => { openModal('insertLink'); setContextMenu(null); }}
-            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
-          >
-            <Link2 className="w-4 h-4" /> Insert Link
-          </button>
-          <button
-            onClick={() => { openModal('insertImage'); setContextMenu(null); }}
-            className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
-          >
-            <ImagePlus className="w-4 h-4" /> Insert Image
-          </button>
+          
+          {/* Table-specific context menu items */}
+          {selectedTableCell && (
+            <>
+              <div className="border-t border-gray-200 dark:border-gray-700 my-1"></div>
+              <div className="px-3 py-1 text-xs font-semibold text-gray-500 dark:text-gray-400">Table</div>
+              <button
+                onClick={() => { addTableRow('above'); setContextMenu(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" /> Insert Row Above
+              </button>
+              <button
+                onClick={() => { addTableRow('below'); setContextMenu(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" /> Insert Row Below
+              </button>
+              <button
+                onClick={() => { addTableColumn('left'); setContextMenu(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" /> Insert Column Left
+              </button>
+              <button
+                onClick={() => { addTableColumn('right'); setContextMenu(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+              >
+                <Plus className="w-4 h-4" /> Insert Column Right
+              </button>
+              <div className="border-t border-gray-200 dark:border-gray-700 my-1"></div>
+              <button
+                onClick={() => { deleteTableRow(); setContextMenu(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2 text-red-600 dark:text-red-400"
+              >
+                <Trash2 className="w-4 h-4" /> Delete Row
+              </button>
+              <button
+                onClick={() => { deleteTableColumn(); setContextMenu(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2 text-red-600 dark:text-red-400"
+              >
+                <Trash2 className="w-4 h-4" /> Delete Column
+              </button>
+              <button
+                onClick={() => { deleteTable(); setContextMenu(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2 text-red-600 dark:text-red-400"
+              >
+                <Trash2 className="w-4 h-4" /> Delete Table
+              </button>
+              <div className="border-t border-gray-200 dark:border-gray-700 my-1"></div>
+              <button
+                onClick={() => { setShowCellColorPicker(true); setContextMenu(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+              >
+                <Palette className="w-4 h-4" /> Cell Background Color
+              </button>
+            </>
+          )}
+          
+          {/* Standard insert options */}
+          {!selectedTableCell && (
+            <>
+              <div className="border-t border-gray-200 dark:border-gray-700 my-1"></div>
+              <button
+                onClick={() => { openModal('insertLink'); setContextMenu(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+              >
+                <Link2 className="w-4 h-4" /> Insert Link
+              </button>
+              <button
+                onClick={() => { openModal('insertImage'); setContextMenu(null); }}
+                className="w-full text-left px-3 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 flex items-center gap-2"
+              >
+                <ImagePlus className="w-4 h-4" /> Insert Image
+              </button>
+            </>
+          )}
         </div>
       )}
 
