@@ -1194,8 +1194,20 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       }
     };
 
+    // Prevent text selection during drag
+    const handleSelectStart = (e: Event) => {
+      if (isSelectingCells) {
+        e.preventDefault();
+      }
+    };
+
     document.addEventListener('selectionchange', handleSelectionChange);
-    return () => document.removeEventListener('selectionchange', handleSelectionChange);
+    document.addEventListener('selectstart', handleSelectStart);
+    
+    return () => {
+      document.removeEventListener('selectionchange', handleSelectionChange);
+      document.removeEventListener('selectstart', handleSelectStart);
+    };
   }, [selectedTableCell, isSelectingCells]);
 
   // Handle cell click for multi-selection (with Ctrl/Cmd key)
@@ -1222,28 +1234,84 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   // Handle drag selection for table cells
   const handleTableCellMouseDown = (e: React.MouseEvent, cell: HTMLTableCellElement) => {
     if (e.button === 0 && !e.ctrlKey && !e.metaKey) {
+      // Prevent default text selection
+      e.preventDefault();
+      
       // Start drag selection
       setIsSelectingCells(true);
       const newSelection = new Set<HTMLTableCellElement>();
       newSelection.add(cell);
       setSelectedTableCells(newSelection);
       setShowTableToolbar(true);
+      
+      // Store the starting cell for rectangular selection
+      (window as any).__tableDragStart = cell;
     }
   };
 
   const handleTableCellMouseEnter = (e: React.MouseEvent, cell: HTMLTableCellElement) => {
     if (isSelectingCells && e.buttons === 1) {
-      // Add cell to selection during drag
-      const newSelection = new Set(selectedTableCells);
-      newSelection.add(cell);
+      // Prevent default during drag
+      e.preventDefault();
+      
+      // Get the starting cell
+      const startCell = (window as any).__tableDragStart as HTMLTableCellElement | undefined;
+      if (!startCell) return;
+      
+      // Calculate rectangular selection
+      const newSelection = calculateRectangularSelection(startCell, cell);
       setSelectedTableCells(newSelection);
     }
   };
 
   const handleTableCellMouseUp = () => {
-    if (isSelectingCells && selectedTableCells.size === 0) {
+    if (isSelectingCells) {
       setIsSelectingCells(false);
+      // Clean up drag start reference
+      delete (window as any).__tableDragStart;
     }
+  };
+
+  // Calculate rectangular selection between two cells
+  const calculateRectangularSelection = (startCell: HTMLTableCellElement, endCell: HTMLTableCellElement): Set<HTMLTableCellElement> => {
+    const selection = new Set<HTMLTableCellElement>();
+    
+    // Get table reference
+    const table = startCell.closest('table');
+    if (!table) return selection;
+    
+    // Get row and column indices
+    const startRow = startCell.closest('tr');
+    const endRow = endCell.closest('tr');
+    if (!startRow || !endRow) return selection;
+    
+    const startRowIndex = Array.from(table.querySelectorAll('tr')).indexOf(startRow);
+    const endRowIndex = Array.from(table.querySelectorAll('tr')).indexOf(endRow);
+    
+    const startColIndex = Array.from(startRow.children).indexOf(startCell);
+    const endColIndex = Array.from(endRow.children).indexOf(endCell);
+    
+    // Calculate bounds
+    const minRow = Math.min(startRowIndex, endRowIndex);
+    const maxRow = Math.max(startRowIndex, endRowIndex);
+    const minCol = Math.min(startColIndex, endColIndex);
+    const maxCol = Math.max(startColIndex, endColIndex);
+    
+    // Select all cells in the rectangle
+    const rows = table.querySelectorAll('tr');
+    for (let r = minRow; r <= maxRow; r++) {
+      const row = rows[r];
+      if (!row) continue;
+      
+      for (let c = minCol; c <= maxCol; c++) {
+        const cell = row.children[c] as HTMLTableCellElement;
+        if (cell && (cell.tagName === 'TD' || cell.tagName === 'TH')) {
+          selection.add(cell);
+        }
+      }
+    }
+    
+    return selection;
   };
 
   // Update visual selection state for table cells
@@ -1263,6 +1331,19 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       cell.style.outlineOffset = '-2px';
     });
   }, [selectedTableCells]);
+
+  // Global mouseup listener to end drag selection
+  useEffect(() => {
+    const handleGlobalMouseUp = () => {
+      if (isSelectingCells) {
+        setIsSelectingCells(false);
+        delete (window as any).__tableDragStart;
+      }
+    };
+
+    window.addEventListener('mouseup', handleGlobalMouseUp);
+    return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
+  }, [isSelectingCells]);
 
   const insertPageBreak = () => {
     execCommand('insertHTML', '<div style="page-break-after: always; border-top: 2px dashed #9ca3af; margin: 2em 0; padding-top: 4px;"><span style="font-size: 10px; color: #9ca3af;">— Page Break —</span></div><p><br></p>');
@@ -2140,7 +2221,9 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             ref={editorRef}
             contentEditable={!readOnly && !documentProtected}
             onInput={handleInput}
-            onMouseUp={handleTableCellMouseUp}
+            onMouseUp={() => {
+              handleTableCellMouseUp();
+            }}
             onClick={(e) => {
               // Handle Ctrl/Cmd+Click for multi-selection
               const target = e.target as HTMLElement;
@@ -2149,14 +2232,18 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
               }
             }}
             onMouseDown={(e) => {
-              // Handle drag selection
+              // Prevent default text selection when starting drag on table cells
               const target = e.target as HTMLElement;
               if (target.tagName === 'TD' || target.tagName === 'TH') {
                 handleTableCellMouseDown(e, target as HTMLTableCellElement);
               }
             }}
             onMouseMove={(e) => {
-              // Handle drag selection
+              // Handle drag selection - prevent default to avoid text selection
+              if (isSelectingCells && e.buttons === 1) {
+                e.preventDefault();
+              }
+              
               const target = e.target as HTMLElement;
               if (target.tagName === 'TD' || target.tagName === 'TH') {
                 handleTableCellMouseEnter(e, target as HTMLTableCellElement);
