@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo, Component, ErrorInfo, ReactNode } from 'react';
 import {
   Download, Plus, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
   Undo, Redo, Search, Trash2, Copy, Scissors, Clipboard,
@@ -8,11 +8,93 @@ import {
   Square, Grid2x2, Columns, Rows, PaintBucket,
   Table2, TrendingUp, BarChart3, PieChart,
   MessageSquare, Link2, Image, ListFilter,
-  FileText
+  FileText, AlertCircle, RefreshCw
 } from 'lucide-react';
 import { exportXlsx } from '../utils/fileHandlers';
 import type { SpreadsheetCell, CellStyle, CellFormat, Sheet } from '../types';
 import { v4 as uuidv4 } from 'uuid';
+
+// Error Boundary Component
+interface ErrorBoundaryProps {
+  children: ReactNode;
+  fallback?: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class SpreadsheetErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error('Spreadsheet Error:', error, errorInfo);
+    
+    // Log to localStorage for debugging
+    try {
+      localStorage.setItem('spreadsheet_error', JSON.stringify({
+        message: error.message,
+        stack: error.stack,
+        componentStack: errorInfo.componentStack,
+        timestamp: new Date().toISOString(),
+      }));
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      if (this.props.fallback) {
+        return this.props.fallback;
+      }
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
+          <div className="max-w-md w-full bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <AlertCircle className="w-8 h-8 text-red-500" />
+              <h2 className="text-xl font-bold text-gray-900 dark:text-white">Spreadsheet Error</h2>
+            </div>
+            <p className="text-gray-600 dark:text-gray-400 mb-4">
+              An error occurred in the spreadsheet editor. Your data is safe.
+            </p>
+            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded p-3 mb-4">
+              <p className="text-sm text-red-800 dark:text-red-200 font-mono">
+                {this.state.error?.message || 'Unknown error'}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => this.setState({ hasError: false, error: null })}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Try Again
+              </button>
+              <button
+                onClick={() => window.location.reload()}
+                className="flex-1 px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg font-medium transition-colors"
+              >
+                Reload Page
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 interface SpreadsheetEditorProps {
   content: SpreadsheetCell[][];
@@ -68,10 +150,10 @@ function formatCellValue(value: string, format: CellFormat = 'general'): string 
   }
 }
 
-// FIX #2: Formula evaluation preserves string literals
+// FIX #2: Safe formula evaluation without new Function()
 function evaluateFormula(formula: string, cells: SpreadsheetCell[][]): string {
   if (!formula.startsWith('=')) return formula;
-  const expr = formula.substring(1);
+  const expr = formula.substring(1).trim();
 
   // Extract string literals first to protect them
   const stringLiterals: string[] = [];
@@ -93,7 +175,7 @@ function evaluateFormula(formula: string, cells: SpreadsheetCell[][]): string {
       args = args.replace(`__STR${i}__`, lit);
     });
 
-    // FIX #1: Range expansion handles multi-letter columns
+    // Range expansion handles multi-letter columns
     const expandRange = (range: string): number[] => {
       const rangeMatch = range.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
       if (!rangeMatch) {
@@ -148,8 +230,15 @@ function evaluateFormula(formula: string, cells: SpreadsheetCell[][]): string {
         const decimals = parseInt(argParts[1]) || 0;
         return (Math.round(num * Math.pow(10, decimals)) / Math.pow(10, decimals)).toString();
       }
-      case 'SQRT': return Math.sqrt(parseFloat(argParts[0]) || 0).toString();
-      case 'POWER': return Math.pow(parseFloat(argParts[0]) || 0, parseFloat(argParts[1]) || 0).toString();
+      case 'SQRT': {
+        const num = parseFloat(argParts[0]) || 0;
+        return num >= 0 ? Math.sqrt(num).toString() : '#ERROR';
+      }
+      case 'POWER': {
+        const base = parseFloat(argParts[0]) || 0;
+        const exp = parseFloat(argParts[1]) || 0;
+        return Math.pow(base, exp).toString();
+      }
       case 'CONCAT': return argParts.map(a => {
         // Check if it's a string literal
         if (a.startsWith('"') && a.endsWith('"')) return a.slice(1, -1);
@@ -160,16 +249,42 @@ function evaluateFormula(formula: string, cells: SpreadsheetCell[][]): string {
         const cond = argParts[0];
         const trueVal = argParts[1];
         const falseVal = argParts[2] || '""';
+        
+        // Safe condition evaluation without new Function
         try {
           const resolved = cond.replace(/([A-Z]+\d+)/gi, (m) => {
             const ref = parseCellRef(m);
             return ref ? (cells[ref.row]?.[ref.col]?.value || '0') : m;
           });
-          const result = new Function(`return ${resolved}`)();
+          
+          // Simple comparison operators only
+          const comparisonMatch = resolved.match(/^(\d+(?:\.\d+)?)\s*(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+)?)$/);
+          let result = false;
+          
+          if (comparisonMatch) {
+            const [, left, op, right] = comparisonMatch;
+            const leftNum = parseFloat(left);
+            const rightNum = parseFloat(right);
+            
+            switch (op) {
+              case '>': result = leftNum > rightNum; break;
+              case '<': result = leftNum < rightNum; break;
+              case '>=': result = leftNum >= rightNum; break;
+              case '<=': result = leftNum <= rightNum; break;
+              case '==': result = leftNum === rightNum; break;
+              case '!=': result = leftNum !== rightNum; break;
+            }
+          } else {
+            // Try to evaluate as boolean
+            result = resolved.toLowerCase() === 'true' || resolved === '1';
+          }
+          
           const tv = trueVal.startsWith('"') ? trueVal.slice(1, -1) : trueVal;
           const fv = falseVal.startsWith('"') ? falseVal.slice(1, -1) : falseVal;
           return result ? tv : fv;
-        } catch { return '#ERROR'; }
+        } catch { 
+          return '#ERROR'; 
+        }
       }
     }
   }
@@ -190,12 +305,114 @@ function evaluateFormula(formula: string, cells: SpreadsheetCell[][]): string {
     return match;
   });
 
+  // Safe arithmetic evaluation without new Function
   try {
-    const result = new Function(`return ${resolved}`)();
-    return typeof result === 'number' ? (Number.isInteger(result) ? result.toString() : result.toFixed(2)) : String(result);
+    // Only allow numbers, operators, parentheses, and whitespace
+    if (!/^[\d\s+\-*/().]+$/.test(resolved)) {
+      return '#ERROR';
+    }
+    
+    // Simple arithmetic parser
+    const result = evaluateArithmetic(resolved);
+    if (isNaN(result) || !isFinite(result)) {
+      return '#ERROR';
+    }
+    
+    return Number.isInteger(result) ? result.toString() : result.toFixed(2);
   } catch {
     return '#ERROR';
   }
+}
+
+// Safe arithmetic evaluator
+function evaluateArithmetic(expr: string): number {
+  // Remove whitespace
+  expr = expr.replace(/\s+/g, '');
+  
+  // Simple recursive descent parser for basic arithmetic
+  let pos = 0;
+  
+  function parseExpression(): number {
+    let result = parseTerm();
+    
+    while (pos < expr.length) {
+      const op = expr[pos];
+      if (op === '+' || op === '-') {
+        pos++;
+        const term = parseTerm();
+        result = op === '+' ? result + term : result - term;
+      } else {
+        break;
+      }
+    }
+    
+    return result;
+  }
+  
+  function parseTerm(): number {
+    let result = parseFactor();
+    
+    while (pos < expr.length) {
+      const op = expr[pos];
+      if (op === '*' || op === '/') {
+        pos++;
+        const factor = parseFactor();
+        if (op === '*') {
+          result *= factor;
+        } else {
+          if (factor === 0) throw new Error('Division by zero');
+          result /= factor;
+        }
+      } else {
+        break;
+      }
+    }
+    
+    return result;
+  }
+  
+  function parseFactor(): number {
+    // Handle unary operators
+    if (expr[pos] === '-') {
+      pos++;
+      return -parseFactor();
+    }
+    if (expr[pos] === '+') {
+      pos++;
+      return parseFactor();
+    }
+    
+    // Handle parentheses
+    if (expr[pos] === '(') {
+      pos++;
+      const result = parseExpression();
+      if (expr[pos] !== ')') throw new Error('Missing closing parenthesis');
+      pos++;
+      return result;
+    }
+    
+    // Parse number
+    let numStr = '';
+    while (pos < expr.length && /[\d.]/.test(expr[pos])) {
+      numStr += expr[pos];
+      pos++;
+    }
+    
+    if (numStr === '') throw new Error('Expected number');
+    
+    const num = parseFloat(numStr);
+    if (isNaN(num)) throw new Error('Invalid number');
+    
+    return num;
+  }
+  
+  const result = parseExpression();
+  
+  if (pos !== expr.length) {
+    throw new Error('Unexpected character at position ' + pos);
+  }
+  
+  return result;
 }
 
 type TabType = 'home' | 'insert' | 'formulas' | 'data' | 'view';
@@ -209,7 +426,7 @@ function createEmptyRow(cols: number): SpreadsheetCell[] {
   return Array.from({ length: cols }, () => createEmptyCell());
 }
 
-export default function SpreadsheetEditor({ content, onChange, fileName, readOnly = false }: SpreadsheetEditorProps) {
+function SpreadsheetEditorInner({ content, onChange, fileName, readOnly = false }: SpreadsheetEditorProps) {
   // FIX #3: Deep clone content to avoid reference issues
   const [sheets, setSheets] = useState<Sheet[]>(() => [{
     id: uuidv4(),
@@ -382,10 +599,49 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
   };
 
   const commitEdit = (row: number, col: number, value: string) => {
+    // Validate cell value
+    const validatedValue = validateCellValue(value);
+    if (validatedValue.error) {
+      // Show error but still allow the edit
+      console.warn('Cell validation warning:', validatedValue.error);
+    }
+    
     const newCells = cells.map(r => r.map(c => ({ ...c })));
-    newCells[row][col] = { ...newCells[row][col], value };
+    newCells[row][col] = { ...newCells[row][col], value: validatedValue.value };
     updateCells(newCells);
     setEditingCell(null);
+  };
+
+  // Validate cell value
+  const validateCellValue = (value: string): { value: string; error?: string } => {
+    // Check for formula syntax
+    if (value.startsWith('=')) {
+      // Basic formula validation
+      const formula = value.substring(1);
+      
+      // Check for balanced parentheses
+      let parenCount = 0;
+      for (const char of formula) {
+        if (char === '(') parenCount++;
+        if (char === ')') parenCount--;
+        if (parenCount < 0) {
+          return { value, error: 'Unbalanced parentheses in formula' };
+        }
+      }
+      if (parenCount !== 0) {
+        return { value, error: 'Unbalanced parentheses in formula' };
+      }
+      
+      // Check for dangerous patterns
+      if (formula.includes('new Function') || 
+          formula.includes('eval(') || 
+          formula.includes('window.') || 
+          formula.includes('document.')) {
+        return { value: '', error: 'Invalid formula: contains dangerous patterns' };
+      }
+    }
+    
+    return { value };
   };
 
   const handleMouseDown = (row: number, col: number, e: React.MouseEvent) => {
@@ -403,14 +659,15 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
     }
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = useCallback(() => {
     setIsSelecting(false);
-  };
+  }, []);
 
   useEffect(() => {
-    window.addEventListener('mouseup', handleMouseUp);
-    return () => window.removeEventListener('mouseup', handleMouseUp);
-  }, []);
+    const handleMouseUpWrapper = () => handleMouseUp();
+    window.addEventListener('mouseup', handleMouseUpWrapper);
+    return () => window.removeEventListener('mouseup', handleMouseUpWrapper);
+  }, [handleMouseUp]);
 
   // FIX #6: Arrow key navigation
   const handleGridKeyDown = (e: React.KeyboardEvent) => {
@@ -529,18 +786,20 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
   }, [selectionRange, cells, copyCells]);
 
   const pasteCells = useCallback(() => {
-    if (!selectedCell) return;
+    // Capture current selectedCell to avoid race condition
+    const currentSelectedCell = selectedCell;
+    if (!currentSelectedCell) return;
     
     // Try system clipboard first
     navigator.clipboard?.readText().then(text => {
-      if (text && selectedCell) {
+      if (text && currentSelectedCell) {
         const rows = text.split('\n').filter(r => r.length > 0);
         const newCells = cells.map(r => r.map(c => ({ ...c, style: c.style ? { ...c.style } : undefined })));
         for (let r = 0; r < rows.length; r++) {
           const cols = rows[r].split('\t');
           for (let c = 0; c < cols.length; c++) {
-            const targetRow = selectedCell.row + r;
-            const targetCol = selectedCell.col + c;
+            const targetRow = currentSelectedCell.row + r;
+            const targetCol = currentSelectedCell.col + c;
             if (targetRow < numRows && targetCol < numCols) {
               newCells[targetRow][targetCol] = { ...newCells[targetRow][targetCol], value: cols[c] };
             }
@@ -550,12 +809,12 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
       }
     }).catch(() => {
       // Fallback to internal clipboard
-      if (!clipboard) return;
+      if (!clipboard || !currentSelectedCell) return;
       const newCells = cells.map(r => r.map(c => ({ ...c, style: c.style ? { ...c.style } : undefined })));
       for (let r = 0; r < clipboard.range.rows; r++) {
         for (let c = 0; c < clipboard.range.cols; c++) {
-          const targetRow = selectedCell.row + r;
-          const targetCol = selectedCell.col + c;
+          const targetRow = currentSelectedCell.row + r;
+          const targetCol = currentSelectedCell.col + c;
           if (targetRow < numRows && targetCol < numCols) {
             newCells[targetRow][targetCol] = { 
               ...newCells[targetRow][targetCol], 
@@ -1149,6 +1408,7 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                   onClick={() => {
                     if (selectedCell && selectionRange) {
                       const { start, end } = selectionRange;
+                      // Convert from 0-indexed to 1-indexed for display
                       const minRow = Math.min(start.row, end.row) + 1;
                       const maxRow = Math.max(start.row, end.row) + 1;
                       const minCol = getColName(Math.min(start.col, end.col));
@@ -1160,6 +1420,7 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                     }
                   }}
                   className="px-2 py-1 text-xs bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded font-mono"
+                  title={`Insert ${fn} function`}
                 >
                   {fn}
                 </button>
@@ -1378,8 +1639,14 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
             const newSheets = [...sheets, newSheet];
             setSheets(newSheets);
             setActiveSheetIdx(sheets.length);
+            // Clear selection when adding new sheet
+            setSelectedCell(null);
+            setSelectionRange(null);
+            setEditingCell(null);
             // FIX #19: Notify parent
             onChange(newSheet.cells);
+            // Add to history so undo/redo works
+            pushHistory(newSheet.cells);
           }}
           className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded"
           title="Add Sheet"
@@ -1391,6 +1658,10 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
             key={sheet.id}
             onClick={() => {
               setActiveSheetIdx(idx);
+              // Clear selection when switching sheets
+              setSelectedCell(null);
+              setSelectionRange(null);
+              setEditingCell(null);
               onChange(sheet.cells);
             }}
             className={`px-3 py-1 text-sm rounded-t border-b-2 ${
@@ -1516,6 +1787,7 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                   onClick={() => {
                     if (selectedCell && selectionRange) {
                       const { start, end } = selectionRange;
+                      // Convert from 0-indexed to 1-indexed for display
                       const minRow = Math.min(start.row, end.row) + 1;
                       const maxRow = Math.max(start.row, end.row) + 1;
                       const minCol = getColName(Math.min(start.col, end.col));
@@ -1649,5 +1921,14 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
         </div>
       )}
     </div>
+  );
+}
+
+// Export with error boundary wrapper
+export default function SpreadsheetEditor(props: SpreadsheetEditorProps) {
+  return (
+    <SpreadsheetErrorBoundary>
+      <SpreadsheetEditorInner {...props} />
+    </SpreadsheetErrorBoundary>
   );
 }
