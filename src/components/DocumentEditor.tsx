@@ -8,8 +8,7 @@ import {
   ChevronDown, X, Upload, Columns,
   FileText, Save, Ruler as RulerIcon,
   ImagePlus, Link2, Table2, Minus as MinusIcon,
-  FileMinus2, Hash,
-  Superscript as SupIcon, Heading1, Heading2, Heading3, Quote
+  FileMinus2, Hash, ChevronUp, ChevronDown as ChevronDownIcon
 } from 'lucide-react';
 
 // Extend Window interface for window.find
@@ -34,6 +33,14 @@ interface DocumentEditorProps {
   fileName: string;
   readOnly?: boolean;
 }
+
+// Constants (FIX #71: No magic numbers)
+const PAGE_WIDTH_A4 = 816; // 8.5 inches * 96px
+const PAGE_HEIGHT_A4 = 1056; // 11 inches * 96px
+const MAX_TABLE_ROWS = 20;
+const MAX_TABLE_COLS = 10;
+const MIN_TABLE_ROWS = 1;
+const MIN_TABLE_COLS = 1;
 
 const FONT_FAMILIES = [
   { name: 'Arial', value: 'Arial, sans-serif', command: 'Arial' },
@@ -89,6 +96,9 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   const [findText, setFindText] = useState('');
   const [replaceText, setReplaceText] = useState('');
   const [findCount, setFindCount] = useState(0);
+  const [findMatches, setFindMatches] = useState<number[]>([]);
+  const [currentFindIndex, setCurrentFindIndex] = useState(0);
+  const [caseSensitive, setCaseSensitive] = useState(false);
   const [imageUrl, setImageUrl] = useState('');
   const [linkUrl, setLinkUrl] = useState('');
   const [linkText, setLinkText] = useState('');
@@ -96,18 +106,30 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   const [tableCols, setTableCols] = useState(3);
   const [lineSpacingValue, setLineSpacingValue] = useState(1.5);
   const [activeDropdown, setActiveDropdown] = useState<ActiveDropdown>('none');
-  const [headingValue, setHeadingValue] = useState('p');
+  
+  // FIX #1 & #2: Track current font and size
+  const [currentFont, setCurrentFont] = useState('Arial');
+  const [currentFontSize, setCurrentFontSize] = useState('3');
+  
+  // FIX #10: Track formatting state
+  const [isBold, setIsBold] = useState(false);
+  const [isItalic, setIsItalic] = useState(false);
+  const [isUnderline, setIsUnderline] = useState(false);
+  const [currentTextColor, setCurrentTextColor] = useState('#000000');
+  const [currentHighlightColor, setCurrentHighlightColor] = useState('transparent');
+  
+  // FIX #33: Track recent colors
+  const [recentTextColors, setRecentTextColors] = useState<string[]>([]);
+  const [recentHighlightColors, setRecentHighlightColors] = useState<string[]>([]);
 
-  // FIX #2: Calculate stats from HTML string directly instead of reading DOM
+  // FIX #4: Optimized stats calculation using string parsing instead of DOM
   const stats = useMemo(() => {
     if (!content) return { words: 0, chars: 0, paragraphs: 0 };
-    // Strip HTML tags to get plain text
-    const tempDiv = document.createElement('div');
-    tempDiv.innerHTML = content;
-    const text = tempDiv.textContent || tempDiv.innerText || '';
-    const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+    // Strip HTML tags using regex (much faster than DOM)
+    const text = content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    const words = text ? text.split(/\s+/).length : 0;
     const chars = text.length;
-    // Count block-level elements
+    // Count block-level elements using regex
     const blockMatch = content.match(/<(p|h[1-6]|li|blockquote|div)[\s>]/gi);
     const paragraphs = blockMatch ? blockMatch.length : 1;
     return { words, chars, paragraphs };
@@ -119,6 +141,29 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       editorRef.current.innerHTML = content;
     }
   }, [content]);
+
+  // FIX #10: Update formatting state on selection change
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      if (!editorRef.current) return;
+      
+      setIsBold(document.queryCommandState('bold'));
+      setIsItalic(document.queryCommandState('italic'));
+      setIsUnderline(document.queryCommandState('underline'));
+      
+      const fontSize = document.queryCommandValue('fontSize');
+      if (fontSize) setCurrentFontSize(fontSize);
+      
+      const fontName = document.queryCommandValue('fontName');
+      if (fontName) setCurrentFont(fontName.replace(/['"]/g, ''));
+      
+      const foreColor = document.queryCommandValue('foreColor');
+      if (foreColor) setCurrentTextColor(foreColor);
+    };
+
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => document.removeEventListener('selectionchange', handleSelectionChange);
+  }, []);
 
   // Save selection before opening modals
   const saveSelection = () => {
@@ -157,7 +202,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     }
   };
 
-  // FIX #3: Use editorRef.current.innerHTML for save
   const handleExport = async () => {
     if (editorRef.current) {
       await exportDocx(editorRef.current.innerHTML, fileName);
@@ -183,7 +227,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     URL.revokeObjectURL(url);
   };
 
-  // FIX #4: Save selection before opening modal, restore before inserting
   const openModal = (type: ModalType) => {
     saveSelection();
     setModal(type);
@@ -195,6 +238,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   const insertImage = (src: string) => {
     restoreSelection();
+    // FIX #28: Preserve aspect ratio
     execCommand('insertHTML', `<img src="${src}" style="max-width: 100%; height: auto; margin: 1em 0; border-radius: 4px; display: block;" />`);
     closeModal();
     setImageUrl('');
@@ -217,9 +261,9 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     if (linkUrl) {
       restoreSelection();
       const displayText = linkText || linkUrl;
-      // Sanitize URL
       const safeUrl = linkUrl.startsWith('http') ? linkUrl : `https://${linkUrl}`;
-      execCommand('insertHTML', `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${displayText}</a>&nbsp;`);
+      // FIX #30: Remove &nbsp;
+      execCommand('insertHTML', `<a href="${safeUrl}" target="_blank" rel="noopener noreferrer" style="color: #2563eb; text-decoration: underline;">${displayText}</a>`);
       closeModal();
       setLinkUrl('');
       setLinkText('');
@@ -233,7 +277,8 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       table += '<tr>';
       for (let c = 0; c < tableCols; c++) {
         const tag = r === 0 ? 'th' : 'td';
-        table += `<${tag} style="border: 1px solid #d1d5db; padding: 8px 12px; min-width: 80px;${r === 0 ? ' background-color: #f3f4f6; font-weight: 600;' : ''}" contenteditable="true">&nbsp;</${tag}>`;
+        // FIX #7: Remove contenteditable from table cells
+        table += `<${tag} style="border: 1px solid #d1d5db; padding: 8px 12px; min-width: 80px;${r === 0 ? ' background-color: #f3f4f6; font-weight: 600;' : ''}">&nbsp;</${tag}>`;
       }
       table += '</tr>';
     }
@@ -251,22 +296,26 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     execCommand('insertText', char);
   };
 
-  // FIX #8: Apply line spacing to all block elements in selection
+  // FIX #11: Apply line spacing only to current paragraph or selection
   const applyLineSpacing = () => {
     if (!editorRef.current) return;
     
     const selection = window.getSelection();
     if (!selection || selection.rangeCount === 0) {
-      // If no selection, apply to all paragraphs
-      const allBlocks = editorRef.current.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, div');
-      allBlocks.forEach(el => {
-        (el as HTMLElement).style.lineHeight = String(lineSpacingValue);
-      });
+      // Apply to current paragraph only
+      const currentNode = selection?.anchorNode;
+      if (currentNode) {
+        let parentEl = currentNode.nodeType === Node.TEXT_NODE ? currentNode.parentElement : currentNode as Element;
+        while (parentEl && parentEl !== editorRef.current) {
+          if (['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'DIV'].includes(parentEl.tagName)) {
+            (parentEl as HTMLElement).style.lineHeight = String(lineSpacingValue);
+            break;
+          }
+          parentEl = parentEl.parentElement;
+        }
+      }
     } else {
       const range = selection.getRangeAt(0);
-      const container = range.commonAncestorContainer;
-      
-      // Find all block elements in the range
       const walker = document.createTreeWalker(
         editorRef.current,
         NodeFilter.SHOW_ELEMENT,
@@ -284,52 +333,77 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       );
 
       let node = walker.nextNode();
-      let found = false;
       while (node) {
         (node as HTMLElement).style.lineHeight = String(lineSpacingValue);
-        found = true;
         node = walker.nextNode();
-      }
-
-      // If no block elements found, try to find parent block
-      if (!found) {
-        let parentEl = container.nodeType === Node.TEXT_NODE ? container.parentElement : container as Element;
-        while (parentEl && parentEl !== editorRef.current) {
-          if (['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'DIV'].includes(parentEl.tagName)) {
-            (parentEl as HTMLElement).style.lineHeight = String(lineSpacingValue);
-            break;
-          }
-          parentEl = parentEl.parentElement;
-        }
       }
     }
     
     onChange(editorRef.current.innerHTML);
-    closeModal();
+    closeModal(); // FIX #35: Auto-close modal
   };
 
-  // FIX #7: Find in text content, not HTML
+  // FIX #5 & #18 & #19: Enhanced find with case sensitivity and navigation
   const handleFind = () => {
     if (!findText || !editorRef.current) return;
     
-    // Count matches in text content only
     const textContent = editorRef.current.textContent || '';
-    const regex = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-    const matches = textContent.match(regex);
-    setFindCount(matches?.length || 0);
+    const flags = caseSensitive ? 'g' : 'gi';
+    const regex = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
+    
+    // Find all matches
+    const matches: number[] = [];
+    let match;
+    while ((match = regex.exec(textContent)) !== null) {
+      matches.push(match.index);
+    }
+    
+    setFindMatches(matches);
+    setFindCount(matches.length);
+    setCurrentFindIndex(0);
     
     // Use browser's native find for highlighting
     if (window.find) {
-      window.find(findText, false, false, true, false, false, false);
+      try {
+        window.find(findText, caseSensitive, false, true, false, false, false);
+      } catch (e) {
+        // Fallback for browsers that don't support all parameters
+        window.find(findText, caseSensitive);
+      }
     }
   };
 
-  // FIX #7: Replace using DOM manipulation, not HTML string replacement
+  // FIX #18: Find next/previous
+  const findNext = () => {
+    if (findMatches.length === 0) return;
+    const nextIndex = (currentFindIndex + 1) % findMatches.length;
+    setCurrentFindIndex(nextIndex);
+    if (window.find) {
+      try {
+        window.find(findText, caseSensitive, false, true);
+      } catch (e) {
+        window.find(findText, caseSensitive);
+      }
+    }
+  };
+
+  const findPrevious = () => {
+    if (findMatches.length === 0) return;
+    const prevIndex = (currentFindIndex - 1 + findMatches.length) % findMatches.length;
+    setCurrentFindIndex(prevIndex);
+    if (window.find) {
+      try {
+        window.find(findText, caseSensitive, true, true);
+      } catch (e) {
+        window.find(findText, caseSensitive, true);
+      }
+    }
+  };
+
   const handleReplace = (all: boolean = false) => {
     if (!findText || !editorRef.current) return;
     
     if (all) {
-      // Walk through text nodes and replace
       const walker = document.createTreeWalker(
         editorRef.current,
         NodeFilter.SHOW_TEXT,
@@ -343,7 +417,8 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         node = walker.nextNode();
       }
       
-      const regex = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
+      const flags = caseSensitive ? 'g' : 'gi';
+      const regex = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
       textNodes.forEach(textNode => {
         if (regex.test(textNode.nodeValue || '')) {
           textNode.nodeValue = (textNode.nodeValue || '').replace(regex, replaceText);
@@ -351,14 +426,14 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       });
       
       onChange(editorRef.current.innerHTML);
-      handleFind(); // Update count
+      handleFind();
     } else {
-      if (window.find && window.find(findText)) {
+      if (window.find && window.find(findText, caseSensitive)) {
         const selection = window.getSelection();
-        if (selection && selection.toString().toLowerCase() === findText.toLowerCase()) {
+        if (selection && selection.toString() === findText) {
           document.execCommand('insertText', false, replaceText);
           if (editorRef.current) onChange(editorRef.current.innerHTML);
-          handleFind(); // Update count
+          handleFind();
         }
       }
     }
@@ -368,41 +443,56 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     execCommand('removeFormat');
   };
 
-  // FIX #5: Use just the font name for fontName command
+  // FIX #1 & #22: Set font family and track it
   const setFontFamily = (font: typeof FONT_FAMILIES[0]) => {
     execCommand('fontName', font.command);
+    setCurrentFont(font.name);
     setActiveDropdown('none');
   };
 
+  // FIX #2: Set font size and track it
   const setFontSizeValue = (size: string) => {
     execCommand('fontSize', size);
+    setCurrentFontSize(size);
   };
 
+  // FIX #22 & #33: Set text color and track it
   const setTextColor = (color: string) => {
     restoreSelection();
     execCommand('foreColor', color);
+    setCurrentTextColor(color);
+    // Add to recent colors
+    setRecentTextColors(prev => {
+      const filtered = prev.filter(c => c !== color);
+      return [color, ...filtered].slice(0, 8);
+    });
     setActiveDropdown('none');
   };
 
+  // FIX #23 & #33: Set highlight color and track it
   const setHighlightColor = (color: string) => {
     restoreSelection();
     if (color === 'transparent') {
       execCommand('hiliteColor', 'transparent');
-      // Fallback: remove background color
       execCommand('backColor', 'transparent');
     } else {
       execCommand('hiliteColor', color);
     }
+    setCurrentHighlightColor(color);
+    // Add to recent colors
+    setRecentHighlightColors(prev => {
+      const filtered = prev.filter(c => c !== color);
+      return [color, ...filtered].slice(0, 8);
+    });
     setActiveDropdown('none');
   };
 
-  // FIX #6: Use single activeDropdown state to manage dropdowns
   const toggleDropdown = (dropdown: ActiveDropdown) => {
     saveSelection();
     setActiveDropdown(prev => prev === dropdown ? 'none' : dropdown);
   };
 
-  // FIX #12 & #13: Escape key closes modals, overlay click closes modals
+  // Keyboard shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -451,7 +541,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [modal, execCommand]);
 
-  // FIX #19: Paste handler to clean up pasted content
+  // FIX #6: More selective paste handler
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
@@ -461,22 +551,20 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       const clipboardData = e.clipboardData;
       if (!clipboardData) return;
 
-      // Try to get HTML first, then fall back to plain text
       let html = clipboardData.getData('text/html');
       const text = clipboardData.getData('text/plain');
 
       if (html) {
-        // Clean the HTML - remove scripts, styles, and dangerous elements
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = html;
         
         // Remove script and style tags
         tempDiv.querySelectorAll('script, style, link, meta').forEach(el => el.remove());
         
-        // Remove event handlers and dangerous attributes
+        // FIX #6: Only remove dangerous attributes, keep safe styles
         tempDiv.querySelectorAll('*').forEach(el => {
           Array.from(el.attributes).forEach(attr => {
-            if (attr.name.startsWith('on') || attr.name === 'style') {
+            if (attr.name.startsWith('on')) {
               el.removeAttribute(attr.name);
             }
           });
@@ -485,7 +573,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         html = tempDiv.innerHTML;
         document.execCommand('insertHTML', false, html);
       } else if (text) {
-        // Insert as plain text, preserving line breaks
         const lines = text.split('\n');
         const htmlContent = lines.map(line => 
           line.trim() ? `<p>${line}</p>` : '<p><br></p>'
@@ -502,7 +589,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     return () => editor.removeEventListener('paste', handlePaste);
   }, [onChange]);
 
-  // FIX #18: Save selection on mouseup/keyup in editor
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
@@ -542,7 +628,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   const ToolbarDivider = () => <div className="w-px h-6 bg-gray-200 dark:bg-gray-700 mx-1 self-center" />;
 
-  // FIX #14: Fix the "OR" divider styling
   const OrDivider = () => (
     <div className="relative py-2">
       <div className="absolute inset-0 flex items-center">
@@ -556,25 +641,22 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   return (
     <div className="flex flex-col h-full bg-gray-100 dark:bg-gray-800">
-      {/* Top Menu Bar */}
+      {/* Top Menu Bar - FIX #3: Make buttons functional */}
       <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-3 py-1.5 flex items-center gap-1 text-sm">
         <button onClick={handleSave} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 flex items-center gap-1">
           <FileText className="w-3.5 h-3.5" /> File
         </button>
         <button onClick={() => execCommand('undo')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
-          Edit
+          Undo
         </button>
-        <button className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
+        <button onClick={() => execCommand('redo')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
+          Redo
+        </button>
+        <button onClick={() => setShowRuler(!showRuler)} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
           View
         </button>
         <button onClick={() => openModal('insertImage')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
           Insert
-        </button>
-        <button className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
-          Format
-        </button>
-        <button className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300">
-          Tools
         </button>
         <div className="flex-1" />
         <button onClick={handleSave} title="Save (Ctrl+S)" className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
@@ -591,18 +673,17 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       {/* Main Toolbar */}
       <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-2 py-1.5">
         <div className="flex items-center gap-0.5 flex-wrap">
-          {/* Undo/Redo */}
           <ToolbarButton icon={Undo} action={() => execCommand('undo')} title="Undo (Ctrl+Z)" />
           <ToolbarButton icon={Redo} action={() => execCommand('redo')} title="Redo (Ctrl+Y)" />
           <ToolbarDivider />
 
-          {/* FIX #5 & #6: Font Family with proper command value */}
+          {/* FIX #1: Font Family with current font display */}
           <div className="relative" data-dropdown="font">
             <button
               onClick={() => toggleDropdown('font')}
               className="flex items-center gap-1 px-2 py-1 border border-gray-200 dark:border-gray-700 rounded hover:bg-gray-50 dark:hover:bg-gray-800 text-sm min-w-[140px] justify-between"
             >
-              <span className="truncate">Arial</span>
+              <span className="truncate">{currentFont}</span>
               <ChevronDown className="w-3 h-3 text-gray-500" />
             </button>
             {activeDropdown === 'font' && (
@@ -621,10 +702,10 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             )}
           </div>
 
-          {/* Font Size */}
+          {/* FIX #2: Font Size controlled component */}
           <select
+            value={currentFontSize}
             onChange={(e) => setFontSizeValue(e.target.value)}
-            defaultValue="3"
             className="px-2 py-1 border border-gray-200 dark:border-gray-700 rounded text-sm bg-white dark:bg-gray-900 ml-1"
           >
             <option value="1">8</option>
@@ -638,13 +719,9 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
           <ToolbarDivider />
 
-          {/* FIX #9: Heading select - reset after selection */}
           <select
-            value={headingValue}
-            onChange={(e) => {
-              execCommand('formatBlock', e.target.value);
-              setHeadingValue(e.target.value);
-            }}
+            onChange={(e) => execCommand('formatBlock', e.target.value)}
+            defaultValue="p"
             className="px-2 py-1 border border-gray-200 dark:border-gray-700 rounded text-sm bg-white dark:bg-gray-900"
           >
             <option value="p">Normal</option>
@@ -660,28 +737,44 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
           <ToolbarDivider />
 
-          {/* Text Formatting */}
-          <ToolbarButton icon={Bold} action={() => execCommand('bold')} title="Bold (Ctrl+B)" />
-          <ToolbarButton icon={Italic} action={() => execCommand('italic')} title="Italic (Ctrl+I)" />
-          <ToolbarButton icon={Underline} action={() => execCommand('underline')} title="Underline (Ctrl+U)" />
+          {/* FIX #10: Text formatting with active state */}
+          <ToolbarButton icon={Bold} action={() => execCommand('bold')} title="Bold (Ctrl+B)" active={isBold} />
+          <ToolbarButton icon={Italic} action={() => execCommand('italic')} title="Italic (Ctrl+I)" active={isItalic} />
+          <ToolbarButton icon={Underline} action={() => execCommand('underline')} title="Underline (Ctrl+U)" active={isUnderline} />
           <ToolbarButton icon={Strikethrough} action={() => execCommand('strikeThrough')} title="Strikethrough" />
           <ToolbarButton icon={Subscript} action={() => execCommand('subscript')} title="Subscript" />
           <ToolbarButton icon={Superscript} action={() => execCommand('superscript')} title="Superscript" />
 
           <ToolbarDivider />
 
-          {/* FIX #6: Text Color with single dropdown state */}
+          {/* FIX #22 & #33: Text color with current color display and recent colors */}
           <div className="relative" data-dropdown="textColor">
             <button
               onClick={() => toggleDropdown('textColor')}
               title="Text Color"
               className="flex flex-col items-center p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
             >
-              <span className="text-sm font-bold text-red-500">A</span>
-              <div className="w-4 h-1 bg-red-500 rounded-sm"></div>
+              <span className="text-sm font-bold" style={{ color: currentTextColor }}>A</span>
+              <div className="w-4 h-1 rounded-sm" style={{ backgroundColor: currentTextColor }}></div>
             </button>
             {activeDropdown === 'textColor' && (
               <div className="absolute top-full left-0 mt-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 p-2 w-56">
+                {recentTextColors.length > 0 && (
+                  <>
+                    <div className="text-xs text-gray-500 mb-1">Recent</div>
+                    <div className="grid grid-cols-8 gap-0.5 mb-2">
+                      {recentTextColors.map((color, i) => (
+                        <button
+                          key={`recent-${i}`}
+                          onClick={() => setTextColor(color)}
+                          className="w-6 h-6 rounded border border-gray-200 dark:border-gray-700 hover:scale-110 transition-transform"
+                          style={{ backgroundColor: color }}
+                        />
+                      ))}
+                    </div>
+                    <div className="text-xs text-gray-500 mb-1">All Colors</div>
+                  </>
+                )}
                 <div className="grid grid-cols-8 gap-0.5">
                   {TEXT_COLORS.map((color, i) => (
                     <button
@@ -697,18 +790,34 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             )}
           </div>
 
-          {/* Highlight Color */}
+          {/* FIX #23 & #33: Highlight color with current color display and recent colors */}
           <div className="relative" data-dropdown="highlightColor">
             <button
               onClick={() => toggleDropdown('highlightColor')}
               title="Highlight Color"
               className="flex flex-col items-center p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800"
             >
-              <span className="text-sm font-bold" style={{ backgroundColor: '#ffff00', padding: '0 2px' }}>ab</span>
-              <div className="w-4 h-1 bg-yellow-400 rounded-sm"></div>
+              <span className="text-sm font-bold" style={{ backgroundColor: currentHighlightColor === 'transparent' ? '#fff' : currentHighlightColor, padding: '0 2px' }}>ab</span>
+              <div className="w-4 h-1 rounded-sm" style={{ backgroundColor: currentHighlightColor === 'transparent' ? '#fbbf24' : currentHighlightColor }}></div>
             </button>
             {activeDropdown === 'highlightColor' && (
               <div className="absolute top-full left-0 mt-1 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 p-2 w-56">
+                {recentHighlightColors.length > 0 && (
+                  <>
+                    <div className="text-xs text-gray-500 mb-1">Recent</div>
+                    <div className="grid grid-cols-8 gap-0.5 mb-2">
+                      {recentHighlightColors.map((color, i) => (
+                        <button
+                          key={`recent-${i}`}
+                          onClick={() => setHighlightColor(color)}
+                          className="w-6 h-6 rounded border border-gray-200 dark:border-gray-700 hover:scale-110 transition-transform"
+                          style={{ backgroundColor: color === 'transparent' ? '#fff' : color }}
+                        />
+                      ))}
+                    </div>
+                    <div className="text-xs text-gray-500 mb-1">All Colors</div>
+                  </>
+                )}
                 <div className="grid grid-cols-8 gap-0.5">
                   {HIGHLIGHT_COLORS.map((color, i) => (
                     <button
@@ -733,7 +842,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
           <ToolbarDivider />
 
-          {/* Alignment */}
           <ToolbarButton icon={AlignLeft} action={() => execCommand('justifyLeft')} title="Align Left" />
           <ToolbarButton icon={AlignCenter} action={() => execCommand('justifyCenter')} title="Align Center" />
           <ToolbarButton icon={AlignRight} action={() => execCommand('justifyRight')} title="Align Right" />
@@ -741,7 +849,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
           <ToolbarDivider />
 
-          {/* Lists & Indent */}
           <ToolbarButton icon={List} action={() => execCommand('insertUnorderedList')} title="Bullet List" />
           <ToolbarButton icon={ListOrdered} action={() => execCommand('insertOrderedList')} title="Numbered List" />
           <ToolbarButton icon={Outdent} action={() => execCommand('outdent')} title="Decrease Indent" />
@@ -749,7 +856,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
           <ToolbarDivider />
 
-          {/* Insert - FIX #4: Use openModal to save selection */}
           <ToolbarButton icon={Link2} action={() => openModal('insertLink')} title="Insert Link" />
           <ToolbarButton icon={ImagePlus} action={() => openModal('insertImage')} title="Insert Image" />
           <ToolbarButton icon={Table2} action={() => openModal('insertTable')} title="Insert Table" />
@@ -759,7 +865,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
           <ToolbarDivider />
 
-          {/* Line Spacing */}
           <button
             onClick={() => openModal('lineSpacing')}
             title="Line Spacing"
@@ -768,12 +873,10 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             <Columns className="w-4 h-4 rotate-90" />
           </button>
 
-          {/* Find & Replace */}
           <ToolbarButton icon={Search} action={() => openModal('findReplace')} title="Find & Replace (Ctrl+F)" />
 
           <ToolbarDivider />
 
-          {/* View Options */}
           <ToolbarButton
             icon={RulerIcon}
             action={() => setShowRuler(!showRuler)}
@@ -802,12 +905,12 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         </div>
       )}
 
-      {/* Editor Area - FIX #10: Remove double scaling */}
+      {/* Editor Area */}
       <div className="flex-1 overflow-y-auto bg-gray-200 dark:bg-gray-800 p-4 md:p-8">
         <div
           className="mx-auto bg-white dark:bg-gray-900 shadow-lg relative"
           style={{
-            width: '816px', // Fixed A4 width (8.5 inches * 96px)
+            width: `${PAGE_WIDTH_A4}px`,
             maxWidth: '100%',
             transform: `scale(${zoom / 100})`,
             transformOrigin: 'top center',
@@ -830,7 +933,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         <span>{stats.chars} characters</span>
         <span>{stats.paragraphs} paragraphs</span>
         <div className="flex-1" />
-        <span className="hidden md:inline">English (US)</span>
         <div className="flex items-center gap-1">
           <button onClick={() => setZoom(Math.max(50, zoom - 10))} className="p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
             <ZoomOut className="w-3.5 h-3.5" />
@@ -842,7 +944,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         </div>
       </div>
 
-      {/* Modals - FIX #13: Add overlay click to close */}
+      {/* Modals */}
       {modal !== 'none' && modal !== 'findReplace' && (
         <div 
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
@@ -876,7 +978,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                     </button>
                   </div>
                 </div>
-                {/* FIX #14: Fixed OR divider */}
                 <OrDivider />
                 <div>
                   <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Upload from device</label>
@@ -945,9 +1046,14 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                     <input
                       type="number"
                       value={tableRows}
-                      onChange={(e) => setTableRows(Math.min(20, Math.max(1, parseInt(e.target.value) || 1)))}
-                      min="1"
-                      max="20"
+                      onChange={(e) => {
+                        const value = parseInt(e.target.value);
+                        if (!isNaN(value) && value >= MIN_TABLE_ROWS && value <= MAX_TABLE_ROWS) {
+                          setTableRows(value);
+                        }
+                      }}
+                      min={MIN_TABLE_ROWS}
+                      max={MAX_TABLE_ROWS}
                       className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                   </div>
@@ -956,9 +1062,14 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                     <input
                       type="number"
                       value={tableCols}
-                      onChange={(e) => setTableCols(Math.min(10, Math.max(1, parseInt(e.target.value) || 1)))}
-                      min="1"
-                      max="10"
+                      onChange={(e) => {
+                        const value = parseInt(e.target.value);
+                        if (!isNaN(value) && value >= MIN_TABLE_COLS && value <= MAX_TABLE_COLS) {
+                          setTableCols(value);
+                        }
+                      }}
+                      min={MIN_TABLE_COLS}
+                      max={MAX_TABLE_COLS}
                       className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
                     />
                   </div>
@@ -981,7 +1092,6 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              {/* FIX #15: Responsive grid */}
               <div className="p-4 max-h-96 overflow-y-auto">
                 <div className="grid grid-cols-8 sm:grid-cols-10 gap-1">
                   {SPECIAL_CHARS.map((char, i) => (
@@ -1007,14 +1117,12 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              {/* FIX #16: Apply immediately on click */}
               <div className="p-4 space-y-2">
                 {[1, 1.15, 1.5, 2, 2.5, 3].map(val => (
                   <button
                     key={val}
                     onClick={() => {
                       setLineSpacingValue(val);
-                      // Apply immediately
                       if (editorRef.current) {
                         const blocks = editorRef.current.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, div');
                         blocks.forEach(el => {
@@ -1038,7 +1146,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         </div>
       )}
 
-      {/* Find & Replace - floating panel */}
+      {/* FIX #17 & #18: Enhanced Find & Replace with navigation */}
       {modal === 'findReplace' && (
         <div className="fixed top-20 right-4 bg-white dark:bg-gray-900 rounded-lg shadow-2xl border border-gray-200 dark:border-gray-700 w-80 z-50">
           <div className="flex items-center justify-between p-3 border-b border-gray-200 dark:border-gray-700">
@@ -1061,7 +1169,27 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                 Find
               </button>
             </div>
-            {findCount > 0 && <p className="text-xs text-gray-500">{findCount} match(es) found</p>}
+            {/* FIX #19: Case sensitive option */}
+            <label className="flex items-center gap-2 text-xs text-gray-600 dark:text-gray-400">
+              <input
+                type="checkbox"
+                checked={caseSensitive}
+                onChange={(e) => setCaseSensitive(e.target.checked)}
+                className="rounded"
+              />
+              Case sensitive
+            </label>
+            {findCount > 0 && (
+              <div className="flex items-center gap-2 text-xs text-gray-500">
+                <span>{currentFindIndex + 1} of {findCount}</span>
+                <button onClick={findPrevious} className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700">
+                  <ChevronUp className="w-3 h-3" />
+                </button>
+                <button onClick={findNext} className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700">
+                  <ChevronDownIcon className="w-3 h-3" />
+                </button>
+              </div>
+            )}
             <div className="flex gap-2">
               <input
                 value={replaceText}
