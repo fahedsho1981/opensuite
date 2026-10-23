@@ -14,8 +14,28 @@ import {
   PenTool, Palette, FileCheck, Share2, Cloud, Mail, Code, Plus, Settings,
   Keyboard, HelpCircle, AlertCircle, CheckCircle, Info, ExternalLink,
   Scissors, Copy as CopyIcon, Clipboard as ClipboardIcon,
-  Edit3, Trash2
+  Edit3, Trash2, BarChart3, PieChart, TrendingUp, Globe, Languages,
+  FileBarChart, Hash as HashIcon, ListChecks, TextCursorInput,
+  AlignVerticalDistributeCenter, CaseSensitive, Wand2, BookOpenCheck,
+  Bookmark, GitCompare, Quote as QuoteIcon
 } from 'lucide-react';
+import {
+  checkGrammar,
+  autoCorrect,
+  calculateReadability,
+  t,
+  TRANSLATIONS,
+  type Language,
+  parseCSV,
+  mergeTemplate,
+  DOCUMENT_THEMES,
+  type DocumentTheme,
+  generateChartSVG,
+  type ChartData,
+  type ChartType,
+  transformText,
+  generateDropCap,
+} from '../utils/documentUtils';
 
 declare global {
   interface Window {
@@ -225,7 +245,7 @@ const THESAURUS: Record<string, string[]> = {
   'ugly': ['hideous', 'unsightly', 'unattractive', 'homely', 'grotesque', 'repulsive'],
 };
 
-type ModalType = 'none' | 'findReplace' | 'insertImage' | 'specialChars' | 'lineSpacing' | 'insertTable' | 'insertLink' | 'headersFooters' | 'tableOfContents' | 'trackChanges' | 'comments' | 'spellCheck' | 'grammarCheck' | 'thesaurus' | 'wordCountGoals' | 'autoSave' | 'versionHistory' | 'collaboration' | 'templates' | 'mailMerge' | 'macros' | 'addIns' | 'cloudStorage' | 'documentProtection' | 'footnotes' | 'columns' | 'textBoxes' | 'shapes' | 'charts' | 'wordArt' | 'watermarks' | 'pageSetup' | 'spellingErrors';
+type ModalType = 'none' | 'findReplace' | 'insertImage' | 'specialChars' | 'lineSpacing' | 'insertTable' | 'insertLink' | 'headersFooters' | 'tableOfContents' | 'trackChanges' | 'comments' | 'spellCheck' | 'grammarCheck' | 'thesaurus' | 'wordCountGoals' | 'autoSave' | 'versionHistory' | 'collaboration' | 'templates' | 'mailMerge' | 'macros' | 'addIns' | 'cloudStorage' | 'documentProtection' | 'footnotes' | 'columns' | 'textBoxes' | 'shapes' | 'charts' | 'wordArt' | 'watermarks' | 'pageSetup' | 'spellingErrors' | 'grammarErrors' | 'readabilityStats' | 'textTransform' | 'insertChart' | 'mailMergePreview' | 'documentProperties' | 'printPreview' | 'themes' | 'language' | 'autoCorrect' | 'dropCap' | 'lineNumbers' | 'sectionBreak' | 'pageNumbers' | 'index' | 'bibliography' | 'crossReference' | 'caption' | 'compareDocuments';
 type ActiveDropdown = 'none' | 'font' | 'textColor' | 'highlightColor';
 
 interface Comment {
@@ -363,6 +383,57 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     'hello', 'world', 'test', 'example', 'sample', 'demo', 'word', 'processor'
   ]), []);
 
+  // NEW: Language/i18n
+  const [currentLanguage, setCurrentLanguage] = useState<Language>('en');
+
+  // NEW: Theme
+  const [currentTheme, setCurrentTheme] = useState<DocumentTheme>(DOCUMENT_THEMES[0]);
+
+  // NEW: Grammar issues
+  const [grammarIssues, setGrammarIssues] = useState<Array<{ruleId: string; message: string; suggestion?: string; severity: 'error' | 'warning' | 'info'; offset: number; length: number; context: string}>>([]);
+
+  // NEW: Readability stats
+  const [readabilityStats, setReadabilityStats] = useState<ReturnType<typeof calculateReadability> | null>(null);
+
+  // NEW: Mail merge
+  const [csvData, setCsvData] = useState<{headers: string[]; rows: string[][]} | null>(null);
+  const [mergePreviewIndex, setMergePreviewIndex] = useState(0);
+  const [mergedDocuments, setMergedDocuments] = useState<string[]>([]);
+
+  // NEW: Line numbers
+  const [showLineNumbers, setShowLineNumbers] = useState(false);
+
+  // NEW: Page numbers
+  const [showPageNumbers, setShowPageNumbers] = useState(false);
+  const [pageNumberStyle, setPageNumberStyle] = useState<'bottom-center' | 'bottom-right' | 'top-center' | 'top-right'>('bottom-center');
+
+  // NEW: Document properties
+  const [docProperties, setDocProperties] = useState({
+    title: '',
+    author: '',
+    subject: '',
+    keywords: '',
+    created: new Date().toISOString(),
+    modified: new Date().toISOString(),
+  });
+
+  // NEW: Auto-correct
+  const [autoCorrectEnabled, setAutoCorrectEnabled] = useState(true);
+
+  // NEW: Chart data
+  const [chartType, setChartType] = useState<ChartType>('bar');
+  const [chartData, setChartData] = useState<ChartData>({
+    labels: ['Q1', 'Q2', 'Q3', 'Q4'],
+    datasets: [{
+      label: 'Revenue',
+      data: [100, 200, 150, 300],
+      color: '#3b82f6',
+    }],
+  });
+
+  // NEW: Text transform
+  const [selectedTransform, setSelectedTransform] = useState<'uppercase' | 'lowercase' | 'capitalize' | 'titlecase' | 'sentencecase' | 'togglecase' | 'inverse'>('uppercase');
+
   // Feature 53: Check spelling
   const checkSpelling = useCallback(() => {
     if (!editorRef.current) return;
@@ -386,6 +457,148 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       addToast('No spelling errors found', 'success');
     }
   }, [DICTIONARY, addToast]);
+
+  // NEW: Grammar check
+  const runGrammarCheck = useCallback(() => {
+    if (!editorRef.current) return;
+    const text = editorRef.current.textContent || '';
+    const issues = checkGrammar(text);
+    setGrammarIssues(issues);
+    if (issues.length > 0) {
+      openModal('grammarErrors');
+    } else {
+      addToast('No grammar issues found', 'success');
+    }
+  }, [addToast]);
+
+  // NEW: Auto-correct
+  const runAutoCorrect = useCallback(() => {
+    if (!editorRef.current) return;
+    const text = editorRef.current.innerHTML;
+    const plainText = editorRef.current.textContent || '';
+    const { corrected, changes } = autoCorrect(plainText);
+    
+    if (changes.length > 0) {
+      // Apply corrections to HTML
+      let html = text;
+      changes.forEach(change => {
+        const regex = new RegExp(`\\b${change.from}\\b`, 'gi');
+        html = html.replace(regex, change.to);
+      });
+      editorRef.current.innerHTML = html;
+      onChange(html);
+      addToast(`Auto-corrected ${changes.length} word(s)`, 'success');
+    } else {
+      addToast('No corrections needed', 'info');
+    }
+  }, [onChange, addToast]);
+
+  // NEW: Readability stats
+  const showReadabilityStats = useCallback(() => {
+    if (!editorRef.current) return;
+    const text = editorRef.current.innerHTML;
+    const stats = calculateReadability(text);
+    setReadabilityStats(stats);
+    openModal('readabilityStats');
+  }, []);
+
+  // NEW: Insert chart
+  const insertChart = useCallback(() => {
+    if (!editorRef.current) return;
+    const svg = generateChartSVG(chartType, chartData, 500, 350);
+    restoreSelection();
+    execCommand('insertHTML', `<div style="margin: 1em 0; text-align: center;">${svg}</div><p><br></p>`);
+    closeModal();
+    addToast('Chart inserted', 'success');
+  }, [chartType, chartData, addToast]);
+
+  // NEW: Mail merge
+  const handleCSVUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result as string;
+      const data = parseCSV(text);
+      setCsvData(data);
+      addToast(`Loaded ${data.rows.length} records`, 'success');
+    };
+    reader.readAsText(file);
+  }, [addToast]);
+
+  const runMailMerge = useCallback(() => {
+    if (!editorRef.current || !csvData) return;
+    const template = editorRef.current.innerHTML;
+    const merged = mergeTemplate(template, csvData);
+    setMergedDocuments(merged);
+    setMergePreviewIndex(0);
+    openModal('mailMergePreview');
+    addToast(`Generated ${merged.length} documents`, 'success');
+  }, [csvData, addToast]);
+
+  // NEW: Text transform
+  const applyTextTransform = useCallback((transform: 'uppercase' | 'lowercase' | 'capitalize' | 'titlecase' | 'sentencecase' | 'togglecase' | 'inverse') => {
+    const selection = window.getSelection();
+    if (!selection || selection.toString().length === 0) {
+      addToast('Please select text first', 'warning');
+      return;
+    }
+    const selectedText = selection.toString();
+    const transformed = transformText(selectedText, transform);
+    document.execCommand('insertText', false, transformed);
+    addToast(`Text transformed to ${transform}`, 'success');
+    closeModal();
+  }, [addToast]);
+
+  // NEW: Insert drop cap
+  const insertDropCap = useCallback(() => {
+    if (!editorRef.current) return;
+    const selection = window.getSelection();
+    if (!selection || selection.toString().length === 0) {
+      addToast('Please select a paragraph first', 'warning');
+      return;
+    }
+    const selectedText = selection.toString();
+    const dropCapHtml = generateDropCap(selectedText);
+    document.execCommand('insertHTML', false, `<p style="line-height: 1.6;">${dropCapHtml}</p>`);
+    addToast('Drop cap applied', 'success');
+    closeModal();
+  }, [addToast]);
+
+  // NEW: Apply theme
+  const applyTheme = useCallback((theme: DocumentTheme) => {
+    setCurrentTheme(theme);
+    if (editorRef.current) {
+      editorRef.current.style.fontFamily = theme.bodyFont;
+      editorRef.current.style.color = theme.textColor;
+      // Apply to headings
+      const headings = editorRef.current.querySelectorAll('h1, h2, h3, h4, h5, h6');
+      headings.forEach(h => {
+        (h as HTMLElement).style.fontFamily = theme.headingFont;
+        (h as HTMLElement).style.color = theme.primaryColor;
+      });
+    }
+    addToast(`Theme "${theme.name}" applied`, 'success');
+    closeModal();
+  }, [addToast]);
+
+  // NEW: Document properties
+  const updateDocProperties = useCallback(() => {
+    setDocProperties(prev => ({ ...prev, modified: new Date().toISOString() }));
+    addToast('Document properties updated', 'success');
+    closeModal();
+  }, [addToast]);
+
+  // NEW: Print preview
+  const openPrintPreview = useCallback(() => {
+    openModal('printPreview');
+  }, []);
+
+  const doPrint = useCallback(() => {
+    window.print();
+    closeModal();
+  }, []);
 
   // NEW: Keyboard shortcuts help
   const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
@@ -1169,7 +1382,40 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         <button onClick={() => openModal('cloudStorage')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Cloud</button>
         <button onClick={() => openModal('pageSetup')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Page Setup</button>
         <button onClick={checkSpelling} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
-          <CheckCircle className="w-3.5 h-3.5" /> Spell Check
+          <CheckCircle className="w-3.5 h-3.5" /> Spell
+        </button>
+        <button onClick={runGrammarCheck} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <ListChecks className="w-3.5 h-3.5" /> Grammar
+        </button>
+        <button onClick={runAutoCorrect} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Wand2 className="w-3.5 h-3.5" /> Auto-Fix
+        </button>
+        <button onClick={showReadabilityStats} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <BookOpenCheck className="w-3.5 h-3.5" /> Stats
+        </button>
+        <button onClick={() => openModal('insertChart')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <BarChart3 className="w-3.5 h-3.5" /> Chart
+        </button>
+        <button onClick={() => openModal('mailMerge')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Mail className="w-3.5 h-3.5" /> Merge
+        </button>
+        <button onClick={() => openModal('textTransform')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <CaseSensitive className="w-3.5 h-3.5" /> Transform
+        </button>
+        <button onClick={() => openModal('dropCap')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Type className="w-3.5 h-3.5" /> Drop Cap
+        </button>
+        <button onClick={() => openModal('themes')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Palette className="w-3.5 h-3.5" /> Theme
+        </button>
+        <button onClick={() => openModal('language')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Languages className="w-3.5 h-3.5" /> Lang
+        </button>
+        <button onClick={() => openModal('documentProperties')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <FileText className="w-3.5 h-3.5" /> Props
+        </button>
+        <button onClick={openPrintPreview} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Eye className="w-3.5 h-3.5" /> Preview
         </button>
         <button onClick={() => setShowShortcutsHelp(true)} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
           <Keyboard className="w-3.5 h-3.5" /> Shortcuts
@@ -2207,6 +2453,372 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                     ))}
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* Grammar Errors Modal */}
+          {modal === 'grammarErrors' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-lg max-h-[80vh] overflow-y-auto">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-900">
+                <h3 className="font-semibold">Grammar Issues ({grammarIssues.length})</h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 space-y-3">
+                {grammarIssues.length === 0 ? (
+                  <p className="text-sm text-gray-500 text-center py-8">No grammar issues found!</p>
+                ) : (
+                  grammarIssues.map((issue, index) => (
+                    <div key={index} className={`border rounded p-3 ${issue.severity === 'error' ? 'border-red-300 bg-red-50 dark:border-red-800 dark:bg-red-900/20' : issue.severity === 'warning' ? 'border-yellow-300 bg-yellow-50 dark:border-yellow-800 dark:bg-yellow-900/20' : 'border-blue-300 bg-blue-50 dark:border-blue-800 dark:bg-blue-900/20'}`}>
+                      <div className="flex items-start justify-between mb-2">
+                        <div className="flex-1">
+                          <div className="flex items-center gap-2 mb-1">
+                            <span className={`text-xs font-medium px-2 py-0.5 rounded ${issue.severity === 'error' ? 'bg-red-200 text-red-800 dark:bg-red-800 dark:text-red-200' : issue.severity === 'warning' ? 'bg-yellow-200 text-yellow-800 dark:bg-yellow-800 dark:text-yellow-200' : 'bg-blue-200 text-blue-800 dark:bg-blue-800 dark:text-blue-200'}`}>
+                              {issue.severity}
+                            </span>
+                          </div>
+                          <p className="text-sm text-gray-900 dark:text-gray-100 mb-1">{issue.message}</p>
+                          <p className="text-xs text-gray-600 dark:text-gray-400 italic">"{issue.context}"</p>
+                        </div>
+                        {issue.suggestion && (
+                          <button 
+                            onClick={() => {
+                              if (editorRef.current) {
+                                const text = editorRef.current.innerHTML;
+                                const start = issue.offset;
+                                const end = start + issue.length;
+                                const before = text.substring(0, start);
+                                const after = text.substring(end);
+                                editorRef.current.innerHTML = before + issue.suggestion + after;
+                                onChange(editorRef.current.innerHTML);
+                                addToast('Issue corrected', 'success');
+                                closeModal();
+                              }
+                            }}
+                            className="ml-2 px-3 py-1 text-xs bg-green-500 hover:bg-green-600 text-white rounded whitespace-nowrap"
+                          >
+                            Fix: {issue.suggestion}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Readability Stats Modal */}
+          {modal === 'readabilityStats' && readabilityStats && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-y-auto">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-900">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <BookOpenCheck className="w-5 h-5" /> Readability Statistics
+                </h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                    <div className="text-xs text-gray-500 mb-1">Reading Level</div>
+                    <div className="text-lg font-bold text-blue-600 dark:text-blue-400">{readabilityStats.readingLevel}</div>
+                  </div>
+                  <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                    <div className="text-xs text-gray-500 mb-1">Flesch Reading Ease</div>
+                    <div className="text-lg font-bold">{readabilityStats.fleschReadingEase}</div>
+                    <div className="text-xs text-gray-500">{readabilityStats.fleschReadingEase >= 90 ? 'Very Easy' : readabilityStats.fleschReadingEase >= 80 ? 'Easy' : readabilityStats.fleschReadingEase >= 70 ? 'Fairly Easy' : readabilityStats.fleschReadingEase >= 60 ? 'Standard' : readabilityStats.fleschReadingEase >= 50 ? 'Fairly Difficult' : readabilityStats.fleschReadingEase >= 30 ? 'Difficult' : 'Very Confusing'}</div>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-3">
+                  <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                    <div className="text-xs text-gray-500 mb-1">Words</div>
+                    <div className="text-lg font-bold">{readabilityStats.words}</div>
+                  </div>
+                  <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                    <div className="text-xs text-gray-500 mb-1">Sentences</div>
+                    <div className="text-lg font-bold">{readabilityStats.sentences}</div>
+                  </div>
+                  <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                    <div className="text-xs text-gray-500 mb-1">Paragraphs</div>
+                    <div className="text-lg font-bold">{readabilityStats.paragraphs}</div>
+                  </div>
+                  <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                    <div className="text-xs text-gray-500 mb-1">Avg Words/Sentence</div>
+                    <div className="text-lg font-bold">{readabilityStats.averageWordsPerSentence}</div>
+                  </div>
+                  <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                    <div className="text-xs text-gray-500 mb-1">Avg Syllables/Word</div>
+                    <div className="text-lg font-bold">{readabilityStats.averageSyllablesPerWord}</div>
+                  </div>
+                  <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                    <div className="text-xs text-gray-500 mb-1">Characters</div>
+                    <div className="text-lg font-bold">{readabilityStats.characters}</div>
+                  </div>
+                </div>
+                <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                  <div className="text-sm font-medium mb-2">Readability Scores</div>
+                  <div className="grid grid-cols-2 gap-2 text-sm">
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">Flesch-Kincaid Grade:</span><span className="font-medium">{readabilityStats.fleschKincaid}</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">Gunning Fog:</span><span className="font-medium">{readabilityStats.gunningFog}</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">Coleman-Liau:</span><span className="font-medium">{readabilityStats.colemanLiau}</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">ARI:</span><span className="font-medium">{readabilityStats.ari}</span></div>
+                    <div className="flex justify-between"><span className="text-gray-600 dark:text-gray-400">SMOG:</span><span className="font-medium">{readabilityStats.smog}</span></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Insert Chart Modal */}
+          {modal === 'insertChart' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-y-auto">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-900">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <BarChart3 className="w-5 h-5" /> Insert Chart
+                </h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 space-y-4">
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Chart Type</label>
+                  <div className="grid grid-cols-4 gap-2">
+                    {(['bar', 'line', 'pie', 'area'] as ChartType[]).map(type => (
+                      <button
+                        key={type}
+                        onClick={() => setChartType(type)}
+                        className={`p-3 border-2 rounded-lg ${chartType === type ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 dark:border-gray-700'}`}
+                      >
+                        {type === 'bar' && <BarChart3 className="w-6 h-6 mx-auto mb-1" />}
+                        {type === 'line' && <TrendingUp className="w-6 h-6 mx-auto mb-1" />}
+                        {type === 'pie' && <PieChart className="w-6 h-6 mx-auto mb-1" />}
+                        {type === 'area' && <FileBarChart className="w-6 h-6 mx-auto mb-1" />}
+                        <div className="text-xs capitalize">{type}</div>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Chart Title</label>
+                  <input
+                    value={chartData.datasets[0].label}
+                    onChange={(e) => setChartData({ ...chartData, datasets: [{ ...chartData.datasets[0], label: e.target.value }] })}
+                    className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Labels (comma-separated)</label>
+                  <input
+                    value={chartData.labels.join(', ')}
+                    onChange={(e) => setChartData({ ...chartData, labels: e.target.value.split(',').map(s => s.trim()) })}
+                    className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Values (comma-separated)</label>
+                  <input
+                    value={chartData.datasets[0].data.join(', ')}
+                    onChange={(e) => setChartData({ ...chartData, datasets: [{ ...chartData.datasets[0], data: e.target.value.split(',').map(s => parseFloat(s.trim()) || 0) }] })}
+                    className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent"
+                  />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Preview</label>
+                  <div className="border border-gray-200 dark:border-gray-700 rounded p-2 bg-gray-50 dark:bg-gray-800" dangerouslySetInnerHTML={{ __html: generateChartSVG(chartType, chartData, 400, 250) }} />
+                </div>
+                <button onClick={insertChart} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Insert Chart</button>
+              </div>
+            </div>
+          )}
+
+          {/* Mail Merge Modal */}
+          {modal === 'mailMerge' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <Mail className="w-5 h-5" /> Mail Merge
+                </h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 space-y-4">
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Upload CSV File</label>
+                  <input type="file" accept=".csv" onChange={handleCSVUpload} className="w-full text-sm" />
+                  <p className="text-xs text-gray-500 mt-1">Use {'{{column_name}}'} in your document as placeholders</p>
+                </div>
+                {csvData && (
+                  <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                    <div className="text-sm font-medium mb-2">Loaded: {csvData.rows.length} records</div>
+                    <div className="text-xs text-gray-500 mb-2">Columns: {csvData.headers.join(', ')}</div>
+                    <button onClick={runMailMerge} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Generate Documents</button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Mail Merge Preview Modal */}
+          {modal === 'mailMergePreview' && mergedDocuments.length > 0 && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-900">
+                <h3 className="font-semibold">Mail Merge Preview ({mergePreviewIndex + 1} of {mergedDocuments.length})</h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4">
+                <div className="flex gap-2 mb-4">
+                  <button onClick={() => setMergePreviewIndex(Math.max(0, mergePreviewIndex - 1))} disabled={mergePreviewIndex === 0} className="px-3 py-1 bg-gray-100 dark:bg-gray-800 rounded text-sm disabled:opacity-50">Previous</button>
+                  <button onClick={() => setMergePreviewIndex(Math.min(mergedDocuments.length - 1, mergePreviewIndex + 1))} disabled={mergePreviewIndex === mergedDocuments.length - 1} className="px-3 py-1 bg-gray-100 dark:bg-gray-800 rounded text-sm disabled:opacity-50">Next</button>
+                  <button onClick={() => {
+                    const blob = new Blob([mergedDocuments[mergePreviewIndex]], { type: 'text/html' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `document_${mergePreviewIndex + 1}.html`;
+                    a.click();
+                    addToast('Document downloaded', 'success');
+                  }} className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm">Download</button>
+                </div>
+                <div className="border border-gray-200 dark:border-gray-700 rounded p-4 bg-white dark:bg-gray-900" dangerouslySetInnerHTML={{ __html: mergedDocuments[mergePreviewIndex] }} />
+              </div>
+            </div>
+          )}
+
+          {/* Text Transform Modal */}
+          {modal === 'textTransform' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <CaseSensitive className="w-5 h-5" /> Text Transform
+                </h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 space-y-2">
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">Select text in the document, then choose a transformation:</p>
+                {(['uppercase', 'lowercase', 'capitalize', 'titlecase', 'sentencecase', 'togglecase', 'inverse'] as const).map(transform => (
+                  <button key={transform} onClick={() => applyTextTransform(transform)} className="w-full px-3 py-2 border border-gray-200 dark:border-gray-700 rounded hover:bg-gray-50 dark:hover:bg-gray-800 text-sm text-left capitalize">
+                    {transform}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Drop Cap Modal */}
+          {modal === 'dropCap' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <Type className="w-5 h-5" /> Drop Cap
+                </h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4">
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">Select a paragraph to apply a drop cap to the first letter.</p>
+                <button onClick={insertDropCap} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Apply Drop Cap</button>
+              </div>
+            </div>
+          )}
+
+          {/* Themes Modal */}
+          {modal === 'themes' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-y-auto">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-900">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <Palette className="w-5 h-5" /> Document Themes
+                </h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 grid grid-cols-2 gap-4">
+                {DOCUMENT_THEMES.map(theme => (
+                  <button key={theme.name} onClick={() => applyTheme(theme)} className={`border-2 rounded-lg p-4 text-left ${currentTheme.name === theme.name ? 'border-blue-500' : 'border-gray-200 dark:border-gray-700'} hover:border-blue-400`}>
+                    <div className="flex items-center gap-2 mb-2">
+                      <div className="w-4 h-4 rounded" style={{ backgroundColor: theme.primaryColor }}></div>
+                      <div className="font-medium text-sm">{theme.name}</div>
+                    </div>
+                    <div className="text-xs text-gray-500 mb-2">Heading: {theme.headingFont}</div>
+                    <div className="text-xs text-gray-500">Body: {theme.bodyFont}</div>
+                    <div className="flex gap-1 mt-2">
+                      <div className="w-6 h-6 rounded" style={{ backgroundColor: theme.primaryColor }}></div>
+                      <div className="w-6 h-6 rounded" style={{ backgroundColor: theme.secondaryColor }}></div>
+                      <div className="w-6 h-6 rounded" style={{ backgroundColor: theme.accentColor }}></div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Language Modal */}
+          {modal === 'language' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <Languages className="w-5 h-5" /> Language
+                </h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 space-y-2">
+                {Object.entries(TRANSLATIONS).map(([lang]) => (
+                  <button key={lang} onClick={() => { setCurrentLanguage(lang as Language); addToast(`Language set to ${lang}`, 'success'); closeModal(); }} className={`w-full px-3 py-2 border rounded text-left capitalize ${currentLanguage === lang ? 'border-blue-500 bg-blue-50 dark:bg-blue-900/20' : 'border-gray-200 dark:border-gray-700'}`}>
+                    {lang}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Document Properties Modal */}
+          {modal === 'documentProperties' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <FileText className="w-5 h-5" /> Document Properties
+                </h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4 space-y-3">
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Title</label>
+                  <input value={docProperties.title} onChange={(e) => setDocProperties({ ...docProperties, title: e.target.value })} className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent" />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Author</label>
+                  <input value={docProperties.author} onChange={(e) => setDocProperties({ ...docProperties, author: e.target.value })} className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent" />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Subject</label>
+                  <input value={docProperties.subject} onChange={(e) => setDocProperties({ ...docProperties, subject: e.target.value })} className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent" />
+                </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Keywords</label>
+                  <input value={docProperties.keywords} onChange={(e) => setDocProperties({ ...docProperties, keywords: e.target.value })} className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent" />
+                </div>
+                <div className="text-xs text-gray-500">
+                  <div>Created: {new Date(docProperties.created).toLocaleString()}</div>
+                  <div>Modified: {new Date(docProperties.modified).toLocaleString()}</div>
+                </div>
+                <button onClick={updateDocProperties} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Save Properties</button>
+              </div>
+            </div>
+          )}
+
+          {/* Print Preview Modal */}
+          {modal === 'printPreview' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-900">
+                <h3 className="font-semibold flex items-center gap-2">
+                  <Eye className="w-5 h-5" /> Print Preview
+                </h3>
+                <div className="flex gap-2">
+                  <button onClick={doPrint} className="px-3 py-1 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm">Print</button>
+                  <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+                </div>
+              </div>
+              <div className="p-4">
+                <div className="border border-gray-200 dark:border-gray-700 rounded bg-white p-8 max-w-[816px] mx-auto" style={{ minHeight: '1056px' }}>
+                  {showHeaders && headerText && <div className="text-center text-sm text-gray-500 mb-4 pb-2 border-b">{headerText}</div>}
+                  <div dangerouslySetInnerHTML={{ __html: content }} />
+                  {showHeaders && footerText && <div className="text-center text-sm text-gray-500 mt-4 pt-2 border-t">{footerText}</div>}
+                </div>
               </div>
             </div>
           )}
