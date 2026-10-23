@@ -8,12 +8,13 @@ import {
   ChevronDown, X, Upload, Columns,
   FileText, Save, Ruler as RulerIcon,
   ImagePlus, Link2, Table2, Minus as MinusIcon,
-  FileMinus2, Hash, ChevronUp, ChevronDown as ChevronDownIcon,
+  FileMinus2, Hash, ChevronUp,
   MessageSquare, Eye, EyeOff, Lock, Unlock, History, Users,
   BookOpen, Clock, Target, Sparkles, Droplet, Type,
   PenTool, Palette, FileCheck, Share2, Cloud, Mail, Code, Plus, Settings,
   Keyboard, HelpCircle, AlertCircle, CheckCircle, Info, ExternalLink,
-  Scissors, Copy as CopyIcon, Clipboard as ClipboardIcon
+  Scissors, Copy as CopyIcon, Clipboard as ClipboardIcon,
+  Edit3, Trash2
 } from 'lucide-react';
 
 declare global {
@@ -224,7 +225,7 @@ const THESAURUS: Record<string, string[]> = {
   'ugly': ['hideous', 'unsightly', 'unattractive', 'homely', 'grotesque', 'repulsive'],
 };
 
-type ModalType = 'none' | 'findReplace' | 'insertImage' | 'specialChars' | 'lineSpacing' | 'insertTable' | 'insertLink' | 'headersFooters' | 'tableOfContents' | 'trackChanges' | 'comments' | 'spellCheck' | 'grammarCheck' | 'thesaurus' | 'wordCountGoals' | 'autoSave' | 'versionHistory' | 'collaboration' | 'templates' | 'mailMerge' | 'macros' | 'addIns' | 'cloudStorage' | 'documentProtection' | 'footnotes' | 'columns' | 'textBoxes' | 'shapes' | 'charts' | 'wordArt' | 'watermarks' | 'pageSetup';
+type ModalType = 'none' | 'findReplace' | 'insertImage' | 'specialChars' | 'lineSpacing' | 'insertTable' | 'insertLink' | 'headersFooters' | 'tableOfContents' | 'trackChanges' | 'comments' | 'spellCheck' | 'grammarCheck' | 'thesaurus' | 'wordCountGoals' | 'autoSave' | 'versionHistory' | 'collaboration' | 'templates' | 'mailMerge' | 'macros' | 'addIns' | 'cloudStorage' | 'documentProtection' | 'footnotes' | 'columns' | 'textBoxes' | 'shapes' | 'charts' | 'wordArt' | 'watermarks' | 'pageSetup' | 'spellingErrors';
 type ActiveDropdown = 'none' | 'font' | 'textColor' | 'highlightColor';
 
 interface Comment {
@@ -299,6 +300,8 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   const [comments, setComments] = useState<Comment[]>([]);
   const [showComments, setShowComments] = useState(false);
   const [newComment, setNewComment] = useState('');
+  const [editingCommentId, setEditingCommentId] = useState<string | null>(null);
+  const [editingCommentText, setEditingCommentText] = useState('');
 
   // Feature 53: Spell Check
   const [spellCheckEnabled, setSpellCheckEnabled] = useState(false);
@@ -347,6 +350,42 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   const removeToast = useCallback((id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
+
+  // Basic dictionary for spell check (common English words)
+  const DICTIONARY = useMemo(() => new Set([
+    'the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'i', 'it', 'for', 'not', 'on', 
+    'with', 'he', 'as', 'you', 'do', 'at', 'this', 'but', 'his', 'by', 'from', 'they', 'we', 
+    'say', 'her', 'she', 'or', 'an', 'will', 'my', 'one', 'all', 'would', 'there', 'their', 
+    'what', 'so', 'up', 'out', 'if', 'about', 'who', 'get', 'which', 'go', 'me', 'when', 'make',
+    'can', 'like', 'time', 'no', 'just', 'him', 'know', 'take', 'people', 'into', 'year', 'your',
+    'good', 'bad', 'big', 'small', 'happy', 'sad', 'fast', 'slow', 'beautiful', 'ugly',
+    'document', 'editor', 'text', 'word', 'paragraph', 'sentence', 'letter', 'page',
+    'hello', 'world', 'test', 'example', 'sample', 'demo', 'word', 'processor'
+  ]), []);
+
+  // Feature 53: Check spelling
+  const checkSpelling = useCallback(() => {
+    if (!editorRef.current) return;
+    
+    const text = editorRef.current.textContent || '';
+    const words = text.split(/\s+/);
+    const misspelled: string[] = [];
+    
+    words.forEach(word => {
+      const cleanWord = word.toLowerCase().replace(/[^\w]/g, '');
+      if (cleanWord && cleanWord.length > 2 && !DICTIONARY.has(cleanWord)) {
+        misspelled.push(word);
+      }
+    });
+    
+    setMisspelledWords([...new Set(misspelled)]); // Remove duplicates
+    
+    if (misspelled.length > 0) {
+      openModal('spellingErrors');
+    } else {
+      addToast('No spelling errors found', 'success');
+    }
+  }, [DICTIONARY, addToast]);
 
   // NEW: Keyboard shortcuts help
   const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
@@ -411,6 +450,24 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       label,
     };
     setVersions(prev => [version, ...prev].slice(0, 50)); // Keep last 50 versions
+    addToast('Version saved', 'success');
+  };
+
+  // Feature 59: Restore version
+  const restoreVersion = (version: Version) => {
+    if (window.confirm(`Restore version from ${version.timestamp.toLocaleString()}? This will replace your current document.`)) {
+      if (editorRef.current) {
+        editorRef.current.innerHTML = version.content;
+        onChange(version.content);
+        addToast('Version restored', 'success');
+      }
+    }
+  };
+
+  // Feature 59: Delete version
+  const deleteVersion = (versionId: string) => {
+    setVersions(prev => prev.filter(v => v.id !== versionId));
+    addToast('Version deleted', 'info');
   };
 
   useEffect(() => {
@@ -481,45 +538,8 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     }
   };
 
-  // Debounced input handler for performance
-  const debouncedHandleInput = useMemo(() => {
-    let timeoutId: NodeJS.Timeout;
-    return () => {
-      clearTimeout(timeoutId);
-      timeoutId = setTimeout(() => {
-        handleInput();
-      }, 300);
-    };
-  }, []);
-
-  // Drag and drop support for images
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    const files = Array.from(e.dataTransfer.files);
-    const imageFiles = files.filter(f => f.type.startsWith('image/'));
-    
-    if (imageFiles.length > 0) {
-      imageFiles.forEach(file => {
-        const reader = new FileReader();
-        reader.onload = (ev) => {
-          if (ev.target?.result) {
-            insertImage(ev.target.result as string);
-          }
-        };
-        reader.readAsDataURL(file);
-      });
-      addToast(`${imageFiles.length} image(s) inserted`, 'success');
-    }
-  }, []);
-
   const handleDragOver = useCallback((e: React.DragEvent) => {
     e.preventDefault();
-  }, []);
-
-  // Context menu handler
-  const handleContextMenu = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setContextMenu({ x: e.clientX, y: e.clientY });
   }, []);
 
   // Close context menu on click outside
@@ -579,6 +599,32 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     setImageUrl('');
     addToast('Image inserted', 'success');
   };
+
+  // Drag and drop support for images
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    const files = Array.from(e.dataTransfer.files);
+    const imageFiles = files.filter(f => f.type.startsWith('image/'));
+    
+    if (imageFiles.length > 0) {
+      imageFiles.forEach(file => {
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+          if (ev.target?.result) {
+            insertImage(ev.target.result as string);
+          }
+        };
+        reader.readAsDataURL(file);
+      });
+      addToast(`${imageFiles.length} image(s) inserted`, 'success');
+    }
+  }, [addToast]);
+
+  // Context menu handler
+  const handleContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setContextMenu({ x: e.clientX, y: e.clientY });
+  }, []);
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -700,14 +746,17 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   // Feature 49: Add watermark
   const addWatermark = () => {
-    if (!editorRef.current || !watermarkText) return;
-    const watermark = document.createElement('div');
-    watermark.style.cssText = 'position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(-45deg); font-size: 72px; color: rgba(0, 0, 0, 0.1); pointer-events: none; z-index: 1;';
-    watermark.textContent = watermarkText;
-    editorRef.current.style.position = 'relative';
-    editorRef.current.appendChild(watermark);
+    if (!watermarkText) return;
     setShowWatermark(true);
     closeModal();
+    addToast('Watermark added', 'success');
+  };
+
+  // Feature 49: Remove watermark
+  const removeWatermark = () => {
+    setShowWatermark(false);
+    setWatermarkText('');
+    addToast('Watermark removed', 'info');
   };
 
   // Feature 52: Add comment
@@ -725,11 +774,46 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     setComments(prev => [...prev, comment]);
     setNewComment('');
     closeModal();
+    addToast('Comment added', 'success');
   };
 
-  // Feature 55: Look up word in thesaurus
-  const lookupThesaurus = (word: string) => {
-    return THESAURUS[word.toLowerCase()] || [];
+  // Feature 52: Edit comment
+  const startEditComment = (comment: Comment) => {
+    setEditingCommentId(comment.id);
+    setEditingCommentText(comment.text);
+  };
+
+  const saveEditComment = () => {
+    if (!editingCommentId || !editingCommentText.trim()) return;
+    setComments(prev => prev.map(c => 
+      c.id === editingCommentId ? { ...c, text: editingCommentText } : c
+    ));
+    setEditingCommentId(null);
+    setEditingCommentText('');
+    addToast('Comment updated', 'success');
+  };
+
+  const cancelEditComment = () => {
+    setEditingCommentId(null);
+    setEditingCommentText('');
+  };
+
+  // Feature 52: Delete comment
+  const deleteComment = (commentId: string) => {
+    setComments(prev => prev.filter(c => c.id !== commentId));
+    addToast('Comment deleted', 'info');
+  };
+
+  // Feature 55: Look up word in thesaurus and replace
+  const replaceWithSynonym = (synonym: string) => {
+    const selection = window.getSelection();
+    if (selection && selection.toString()) {
+      document.execCommand('insertText', false, synonym);
+      addToast(`Replaced with "${synonym}"`, 'success');
+    } else {
+      addToast('Please select a word first', 'warning');
+    }
+    closeModal();
   };
 
   // Feature 63: Run macro
@@ -951,7 +1035,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [modal, execCommand]);
+  }, [modal]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -963,15 +1047,8 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       let html = clipboardData.getData('text/html');
       const text = clipboardData.getData('text/plain');
       if (html) {
-        const tempDiv = document.createElement('div');
-        tempDiv.innerHTML = html;
-        tempDiv.querySelectorAll('script, style, link, meta').forEach(el => el.remove());
-        tempDiv.querySelectorAll('*').forEach(el => {
-          Array.from(el.attributes).forEach(attr => {
-            if (attr.name.startsWith('on')) el.removeAttribute(attr.name);
-          });
-        });
-        html = tempDiv.innerHTML;
+        // Use sanitizeHTML function
+        html = sanitizeHTML(html);
         document.execCommand('insertHTML', false, html);
       } else if (text) {
         const lines = text.split('\n');
@@ -1004,7 +1081,14 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     };
   }, []);
 
-  const ToolbarButton = ({ icon: Icon, action, title, active = false }: any) => (
+  interface ToolbarButtonProps {
+    icon: React.ComponentType<any>;
+    action: () => void;
+    title: string;
+    active?: boolean;
+  }
+
+  const ToolbarButton = ({ icon: Icon, action, title, active = false }: ToolbarButtonProps) => (
     <button
       onClick={() => { saveSelection(); action(); }}
       disabled={readOnly}
@@ -1084,6 +1168,9 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         <button onClick={() => openModal('documentProtection')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Protect</button>
         <button onClick={() => openModal('cloudStorage')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Cloud</button>
         <button onClick={() => openModal('pageSetup')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Page Setup</button>
+        <button onClick={checkSpelling} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <CheckCircle className="w-3.5 h-3.5" /> Spell Check
+        </button>
         <button onClick={() => setShowShortcutsHelp(true)} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
           <Keyboard className="w-3.5 h-3.5" /> Shortcuts
         </button>
@@ -1371,21 +1458,72 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       {/* Feature 52: Comments Panel */}
       {showComments && (
         <div className="w-80 bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-700 overflow-y-auto">
-          <div className="p-3 border-b border-gray-200 dark:border-gray-700">
+          <div className="p-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
             <h3 className="font-semibold text-sm">Comments ({comments.length})</h3>
+            <button 
+              onClick={() => openModal('comments')}
+              className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"
+              title="Add comment"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
           </div>
           <div className="p-3 space-y-3">
             {comments.map(comment => (
-              <div key={comment.id} className="bg-gray-50 dark:bg-gray-800 rounded p-2">
-                <div className="flex items-center gap-2 mb-1">
-                  <span className="text-xs font-medium text-gray-700 dark:text-gray-300">{comment.author}</span>
-                  <span className="text-xs text-gray-500">{comment.timestamp.toLocaleTimeString()}</span>
+              <div key={comment.id} className="bg-gray-50 dark:bg-gray-800 rounded p-3">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-medium text-gray-700 dark:text-gray-300">{comment.author}</span>
+                    <span className="text-xs text-gray-500">{comment.timestamp.toLocaleTimeString()}</span>
+                  </div>
+                  <div className="flex gap-1">
+                    <button 
+                      onClick={() => startEditComment(comment)}
+                      className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded"
+                      title="Edit"
+                    >
+                      <Edit3 className="w-3 h-3" />
+                    </button>
+                    <button 
+                      onClick={() => deleteComment(comment.id)}
+                      className="p-1 hover:bg-red-100 dark:hover:bg-red-900/30 rounded"
+                      title="Delete"
+                    >
+                      <Trash2 className="w-3 h-3 text-red-500" />
+                    </button>
+                  </div>
                 </div>
-                <p className="text-sm text-gray-600 dark:text-gray-400">{comment.text}</p>
+                {editingCommentId === comment.id ? (
+                  <div className="space-y-2">
+                    <textarea
+                      value={editingCommentText}
+                      onChange={(e) => setEditingCommentText(e.target.value)}
+                      className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1 bg-white dark:bg-gray-900 resize-none"
+                      rows={3}
+                      autoFocus
+                    />
+                    <div className="flex gap-2">
+                      <button 
+                        onClick={saveEditComment}
+                        className="px-2 py-1 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded"
+                      >
+                        Save
+                      </button>
+                      <button 
+                        onClick={cancelEditComment}
+                        className="px-2 py-1 text-xs bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-600 dark:text-gray-400">{comment.text}</p>
+                )}
               </div>
             ))}
             {comments.length === 0 && (
-              <p className="text-sm text-gray-500 text-center py-4">No comments yet</p>
+              <p className="text-sm text-gray-500 text-center py-4">No comments yet. Click + to add one.</p>
             )}
           </div>
         </div>
@@ -1702,14 +1840,20 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                 <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
               </div>
               <div className="p-4">
-                <p className="text-sm text-gray-600 dark:text-gray-400">Select a word in the document and click a synonym to replace it.</p>
-                <div className="mt-4 space-y-2">
-                  {Object.entries(THESAURUS).slice(0, 5).map(([word, synonyms]) => (
-                    <div key={word} className="border border-gray-200 dark:border-gray-700 rounded p-2">
-                      <div className="font-medium text-sm mb-1">{word}</div>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">Select a word in the document, then click a synonym to replace it.</p>
+                <div className="space-y-3">
+                  {Object.entries(THESAURUS).map(([word, synonyms]) => (
+                    <div key={word} className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                      <div className="font-medium text-sm mb-2 text-gray-900 dark:text-gray-100">{word}</div>
                       <div className="flex flex-wrap gap-1">
                         {synonyms.map(synonym => (
-                          <button key={synonym} className="px-2 py-1 text-xs bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded">{synonym}</button>
+                          <button 
+                            key={synonym} 
+                            onClick={() => replaceWithSynonym(synonym)}
+                            className="px-2 py-1 text-xs bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900/50 rounded transition-colors"
+                          >
+                            {synonym}
+                          </button>
                         ))}
                       </div>
                     </div>
@@ -1769,11 +1913,25 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                   <div className="space-y-2">
                     {versions.map(version => (
                       <div key={version.id} className="border border-gray-200 dark:border-gray-700 rounded p-3">
-                        <div className="flex items-center justify-between mb-1">
+                        <div className="flex items-center justify-between mb-2">
                           <span className="text-sm font-medium">{version.label || 'Auto-save'}</span>
                           <span className="text-xs text-gray-500">{version.timestamp.toLocaleString()}</span>
                         </div>
-                        <p className="text-xs text-gray-500">by {version.author}</p>
+                        <p className="text-xs text-gray-500 mb-2">by {version.author}</p>
+                        <div className="flex gap-2">
+                          <button 
+                            onClick={() => restoreVersion(version)}
+                            className="flex-1 px-2 py-1 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded"
+                          >
+                            Restore
+                          </button>
+                          <button 
+                            onClick={() => deleteVersion(version.id)}
+                            className="px-2 py-1 text-xs bg-red-50 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/50 rounded"
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -2010,6 +2168,48 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
               </div>
             </div>
           )}
+
+          {/* Spelling Errors Modal */}
+          {modal === 'spellingErrors' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md max-h-[80vh] overflow-y-auto">
+              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 sticky top-0 bg-white dark:bg-gray-900">
+                <h3 className="font-semibold">Spelling Errors ({misspelledWords.length})</h3>
+                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
+              </div>
+              <div className="p-4">
+                {misspelledWords.length === 0 ? (
+                  <p className="text-sm text-gray-500 text-center py-8">No spelling errors found!</p>
+                ) : (
+                  <div className="space-y-2">
+                    {misspelledWords.map((word, index) => (
+                      <div key={index} className="border border-gray-200 dark:border-gray-700 rounded p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="text-sm font-medium text-red-600 dark:text-red-400">{word}</span>
+                          <button 
+                            onClick={() => {
+                              // Find and replace the word in the document
+                              if (editorRef.current) {
+                                const text = editorRef.current.innerHTML;
+                                const corrected = prompt(`Correct spelling for "${word}":`, word);
+                                if (corrected && corrected !== word) {
+                                  editorRef.current.innerHTML = text.replace(new RegExp(`\\b${word}\\b`, 'g'), corrected);
+                                  onChange(editorRef.current.innerHTML);
+                                  addToast(`Corrected "${word}" to "${corrected}"`, 'success');
+                                }
+                              }
+                            }}
+                            className="px-2 py-1 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded"
+                          >
+                            Correct
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -2033,7 +2233,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
               <div className="flex items-center gap-2 text-xs text-gray-500">
                 <span>{currentFindIndex + 1} of {findCount}</span>
                 <button onClick={findPrevious} className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700"><ChevronUp className="w-3 h-3" /></button>
-                <button onClick={findNext} className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700"><ChevronDownIcon className="w-3 h-3" /></button>
+                <button onClick={findNext} className="px-2 py-0.5 bg-gray-100 dark:bg-gray-800 rounded hover:bg-gray-200 dark:hover:bg-gray-700"><ChevronDown className="w-3 h-3" /></button>
               </div>
             )}
             <div className="flex gap-2">
