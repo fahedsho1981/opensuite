@@ -89,12 +89,6 @@ export const GRAMMAR_RULES: GrammarRule[] = [
     suggestion: 'supposed to',
     severity: 'error',
   },
-  {
-    id: 'comma-splice',
-    pattern: /[a-z]+,\s+[a-z]+/gi,
-    message: 'Possible comma splice - check sentence structure',
-    severity: 'info',
-  },
 ];
 
 export interface GrammarIssue {
