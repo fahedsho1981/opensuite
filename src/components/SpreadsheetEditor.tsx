@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo, Component, ErrorInfo, ReactNode } from 'react';
 import {
   Download, Plus, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight,
   Undo, Redo, Search, Trash2, Copy, Scissors, Clipboard,
@@ -8,11 +8,94 @@ import {
   Square, Grid2x2, Columns, Rows, PaintBucket,
   Table2, TrendingUp, BarChart3, PieChart,
   MessageSquare, Link2, Image, ListFilter,
-  FileText
+  FileText, AlertCircle, RefreshCw,
+  Lock, Unlock, Upload, Printer
 } from 'lucide-react';
 import { exportXlsx } from '../utils/fileHandlers';
 import type { SpreadsheetCell, CellStyle, CellFormat, Sheet } from '../types';
 import { v4 as uuidv4 } from 'uuid';
+
+// Error Boundary Component
+interface ErrorBoundaryProps {
+  children: ReactNode;
+  fallback?: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+  error: Error | null;
+}
+
+class SpreadsheetErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error('Spreadsheet Error:', error, errorInfo);
+    
+    // Log to localStorage for debugging
+    try {
+      localStorage.setItem('spreadsheet_error', JSON.stringify({
+        message: error.message,
+        stack: error.stack,
+        componentStack: errorInfo.componentStack,
+        timestamp: new Date().toISOString(),
+      }));
+    } catch {
+      // Ignore storage errors
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      if (this.props.fallback) {
+        return this.props.fallback;
+      }
+
+      return (
+        <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900 p-4">
+          <div className="max-w-md w-full bg-white dark:bg-gray-800 rounded-lg shadow-lg p-6">
+            <div className="flex items-center gap-3 mb-4">
+              <AlertCircle className="w-8 h-8 text-red-500" />
+              <h2 className="text-xl font-bold text-gray-900 dark:text-white">Spreadsheet Error</h2>
+            </div>
+            <p className="text-gray-600 dark:text-gray-400 mb-4">
+              An error occurred in the spreadsheet editor. Your data is safe.
+            </p>
+            <div className="bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded p-3 mb-4">
+              <p className="text-sm text-red-800 dark:text-red-200 font-mono">
+                {this.state.error?.message || 'Unknown error'}
+              </p>
+            </div>
+            <div className="flex gap-2">
+              <button
+                onClick={() => this.setState({ hasError: false, error: null })}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-lg font-medium transition-colors"
+              >
+                <RefreshCw className="w-4 h-4" />
+                Try Again
+              </button>
+              <button
+                onClick={() => window.location.reload()}
+                className="flex-1 px-4 py-2 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-lg font-medium transition-colors"
+              >
+                Reload Page
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 interface SpreadsheetEditorProps {
   content: SpreadsheetCell[][];
@@ -68,10 +151,10 @@ function formatCellValue(value: string, format: CellFormat = 'general'): string 
   }
 }
 
-// FIX #2: Formula evaluation preserves string literals
+// FIX #2: Safe formula evaluation without new Function()
 function evaluateFormula(formula: string, cells: SpreadsheetCell[][]): string {
   if (!formula.startsWith('=')) return formula;
-  const expr = formula.substring(1);
+  const expr = formula.substring(1).trim();
 
   // Extract string literals first to protect them
   const stringLiterals: string[] = [];
@@ -93,7 +176,7 @@ function evaluateFormula(formula: string, cells: SpreadsheetCell[][]): string {
       args = args.replace(`__STR${i}__`, lit);
     });
 
-    // FIX #1: Range expansion handles multi-letter columns
+    // Range expansion handles multi-letter columns
     const expandRange = (range: string): number[] => {
       const rangeMatch = range.match(/^([A-Z]+)(\d+):([A-Z]+)(\d+)$/i);
       if (!rangeMatch) {
@@ -148,8 +231,15 @@ function evaluateFormula(formula: string, cells: SpreadsheetCell[][]): string {
         const decimals = parseInt(argParts[1]) || 0;
         return (Math.round(num * Math.pow(10, decimals)) / Math.pow(10, decimals)).toString();
       }
-      case 'SQRT': return Math.sqrt(parseFloat(argParts[0]) || 0).toString();
-      case 'POWER': return Math.pow(parseFloat(argParts[0]) || 0, parseFloat(argParts[1]) || 0).toString();
+      case 'SQRT': {
+        const num = parseFloat(argParts[0]) || 0;
+        return num >= 0 ? Math.sqrt(num).toString() : '#ERROR';
+      }
+      case 'POWER': {
+        const base = parseFloat(argParts[0]) || 0;
+        const exp = parseFloat(argParts[1]) || 0;
+        return Math.pow(base, exp).toString();
+      }
       case 'CONCAT': return argParts.map(a => {
         // Check if it's a string literal
         if (a.startsWith('"') && a.endsWith('"')) return a.slice(1, -1);
@@ -160,16 +250,42 @@ function evaluateFormula(formula: string, cells: SpreadsheetCell[][]): string {
         const cond = argParts[0];
         const trueVal = argParts[1];
         const falseVal = argParts[2] || '""';
+        
+        // Safe condition evaluation without new Function
         try {
           const resolved = cond.replace(/([A-Z]+\d+)/gi, (m) => {
             const ref = parseCellRef(m);
             return ref ? (cells[ref.row]?.[ref.col]?.value || '0') : m;
           });
-          const result = new Function(`return ${resolved}`)();
+          
+          // Simple comparison operators only
+          const comparisonMatch = resolved.match(/^(\d+(?:\.\d+)?)\s*(>=|<=|>|<|==|!=)\s*(\d+(?:\.\d+)?)$/);
+          let result = false;
+          
+          if (comparisonMatch) {
+            const [, left, op, right] = comparisonMatch;
+            const leftNum = parseFloat(left);
+            const rightNum = parseFloat(right);
+            
+            switch (op) {
+              case '>': result = leftNum > rightNum; break;
+              case '<': result = leftNum < rightNum; break;
+              case '>=': result = leftNum >= rightNum; break;
+              case '<=': result = leftNum <= rightNum; break;
+              case '==': result = leftNum === rightNum; break;
+              case '!=': result = leftNum !== rightNum; break;
+            }
+          } else {
+            // Try to evaluate as boolean
+            result = resolved.toLowerCase() === 'true' || resolved === '1';
+          }
+          
           const tv = trueVal.startsWith('"') ? trueVal.slice(1, -1) : trueVal;
           const fv = falseVal.startsWith('"') ? falseVal.slice(1, -1) : falseVal;
           return result ? tv : fv;
-        } catch { return '#ERROR'; }
+        } catch { 
+          return '#ERROR'; 
+        }
       }
     }
   }
@@ -190,16 +306,174 @@ function evaluateFormula(formula: string, cells: SpreadsheetCell[][]): string {
     return match;
   });
 
+  // Safe arithmetic evaluation without new Function
   try {
-    const result = new Function(`return ${resolved}`)();
-    return typeof result === 'number' ? (Number.isInteger(result) ? result.toString() : result.toFixed(2)) : String(result);
+    // Only allow numbers, operators, parentheses, and whitespace
+    if (!/^[\d\s+\-*/().]+$/.test(resolved)) {
+      return '#ERROR';
+    }
+    
+    // Simple arithmetic parser
+    const result = evaluateArithmetic(resolved);
+    if (isNaN(result) || !isFinite(result)) {
+      return '#ERROR';
+    }
+    
+    return Number.isInteger(result) ? result.toString() : result.toFixed(2);
   } catch {
     return '#ERROR';
   }
 }
 
+// Safe arithmetic evaluator
+function evaluateArithmetic(expr: string): number {
+  // Remove whitespace
+  expr = expr.replace(/\s+/g, '');
+  
+  // Simple recursive descent parser for basic arithmetic
+  let pos = 0;
+  
+  function parseExpression(): number {
+    let result = parseTerm();
+    
+    while (pos < expr.length) {
+      const op = expr[pos];
+      if (op === '+' || op === '-') {
+        pos++;
+        const term = parseTerm();
+        result = op === '+' ? result + term : result - term;
+      } else {
+        break;
+      }
+    }
+    
+    return result;
+  }
+  
+  function parseTerm(): number {
+    let result = parseFactor();
+    
+    while (pos < expr.length) {
+      const op = expr[pos];
+      if (op === '*' || op === '/') {
+        pos++;
+        const factor = parseFactor();
+        if (op === '*') {
+          result *= factor;
+        } else {
+          if (factor === 0) throw new Error('Division by zero');
+          result /= factor;
+        }
+      } else {
+        break;
+      }
+    }
+    
+    return result;
+  }
+  
+  function parseFactor(): number {
+    // Handle unary operators
+    if (expr[pos] === '-') {
+      pos++;
+      return -parseFactor();
+    }
+    if (expr[pos] === '+') {
+      pos++;
+      return parseFactor();
+    }
+    
+    // Handle parentheses
+    if (expr[pos] === '(') {
+      pos++;
+      const result = parseExpression();
+      if (expr[pos] !== ')') throw new Error('Missing closing parenthesis');
+      pos++;
+      return result;
+    }
+    
+    // Parse number
+    let numStr = '';
+    while (pos < expr.length && /[\d.]/.test(expr[pos])) {
+      numStr += expr[pos];
+      pos++;
+    }
+    
+    if (numStr === '') throw new Error('Expected number');
+    
+    const num = parseFloat(numStr);
+    if (isNaN(num)) throw new Error('Invalid number');
+    
+    return num;
+  }
+  
+  const result = parseExpression();
+  
+  if (pos !== expr.length) {
+    throw new Error('Unexpected character at position ' + pos);
+  }
+  
+  return result;
+}
+
 type TabType = 'home' | 'insert' | 'formulas' | 'data' | 'view';
-type ModalType = 'none' | 'findReplace' | 'insertFunction' | 'sortFilter' | 'insertChart' | 'cellComment';
+type ModalType = 'none' | 'findReplace' | 'insertFunction' | 'sortFilter' | 'insertChart' | 'cellComment' | 'mergeCells' | 'freezePanes' | 'dataValidation' | 'conditionalFormatting' | 'namedRanges' | 'print' | 'importCSV';
+
+// Feature: Cell Merge
+interface MergedCell {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+// Feature: Freeze Panes
+interface FreezePanes {
+  rows: number;
+  cols: number;
+}
+
+// Feature: Data Validation
+interface ValidationRule {
+  type: 'number' | 'text' | 'date' | 'list' | 'custom';
+  operator?: 'between' | 'notBetween' | 'equal' | 'notEqual' | 'greaterThan' | 'lessThan' | 'greaterThanOrEqual' | 'lessThanOrEqual';
+  value1?: string;
+  value2?: string;
+  list?: string[];
+  errorMessage?: string;
+}
+
+// Feature: Conditional Formatting
+interface ConditionalFormat {
+  id: string;
+  range: { startRow: number; startCol: number; endRow: number; endCol: number };
+  type: 'cellValue' | 'formula' | 'colorScale' | 'dataBar' | 'iconSet';
+  condition?: {
+    operator: 'greaterThan' | 'lessThan' | 'between' | 'equal' | 'notEqual' | 'containsText';
+    value?: string;
+    value2?: string;
+  };
+  style: {
+    backgroundColor?: string;
+    color?: string;
+    fontWeight?: string;
+    fontStyle?: string;
+  };
+}
+
+// Feature: Named Ranges
+interface NamedRange {
+  name: string;
+  range: { startRow: number; startCol: number; endRow: number; endCol: number };
+  sheetId: string;
+}
+
+// Feature: Sparklines
+interface Sparkline {
+  cell: { row: number; col: number };
+  dataRange: { startRow: number; startCol: number; endRow: number; endCol: number };
+  type: 'line' | 'column' | 'winLoss';
+}
 
 function createEmptyCell(): SpreadsheetCell {
   return { value: '' };
@@ -209,7 +483,7 @@ function createEmptyRow(cols: number): SpreadsheetCell[] {
   return Array.from({ length: cols }, () => createEmptyCell());
 }
 
-export default function SpreadsheetEditor({ content, onChange, fileName, readOnly = false }: SpreadsheetEditorProps) {
+function SpreadsheetEditorInner({ content, onChange, fileName, readOnly = false }: SpreadsheetEditorProps) {
   // FIX #3: Deep clone content to avoid reference issues
   const [sheets, setSheets] = useState<Sheet[]>(() => [{
     id: uuidv4(),
@@ -240,6 +514,34 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
   const [showBorders, setShowBorders] = useState(false);
   const [frozenRows, setFrozenRows] = useState(0);
   const [frozenCols, setFrozenCols] = useState(0);
+  
+  // Feature: Cell Merge
+  const [mergedCells, setMergedCells] = useState<MergedCell[]>([]);
+  const [mergeMode, setMergeMode] = useState(false);
+  const [mergeStart, setMergeStart] = useState<{ row: number; col: number } | null>(null);
+  
+  // Feature: Freeze Panes
+  const [freezePanes, setFreezePanes] = useState<FreezePanes>({ rows: 0, cols: 0 });
+  
+  // Feature: Data Validation
+  const [validationRules, setValidationRules] = useState<Map<string, ValidationRule>>(new Map());
+  
+  // Feature: Conditional Formatting
+  const [conditionalFormats, setConditionalFormats] = useState<ConditionalFormat[]>([]);
+  
+  // Feature: Named Ranges
+  const [namedRanges, setNamedRanges] = useState<NamedRange[]>([]);
+  
+  // Feature: Sparklines
+  const [sparklines, setSparklines] = useState<Sparkline[]>([]);
+  
+  // Feature: Auto-Fill
+  const [autoFillMode, setAutoFillMode] = useState(false);
+  const [autoFillStart, setAutoFillStart] = useState<{ row: number; col: number } | null>(null);
+  
+  // Feature: Cell Protection
+  const [protectedCells, setProtectedCells] = useState<Set<string>>(new Set());
+  const [sheetProtected, setSheetProtected] = useState(false);
   
   // FIX #4: Use refs for history to avoid race conditions
   const historyRef = useRef<SpreadsheetCell[][][]>([]);
@@ -382,10 +684,49 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
   };
 
   const commitEdit = (row: number, col: number, value: string) => {
+    // Validate cell value
+    const validatedValue = validateCellValue(value);
+    if (validatedValue.error) {
+      // Show error but still allow the edit
+      console.warn('Cell validation warning:', validatedValue.error);
+    }
+    
     const newCells = cells.map(r => r.map(c => ({ ...c })));
-    newCells[row][col] = { ...newCells[row][col], value };
+    newCells[row][col] = { ...newCells[row][col], value: validatedValue.value };
     updateCells(newCells);
     setEditingCell(null);
+  };
+
+  // Validate cell value
+  const validateCellValue = (value: string): { value: string; error?: string } => {
+    // Check for formula syntax
+    if (value.startsWith('=')) {
+      // Basic formula validation
+      const formula = value.substring(1);
+      
+      // Check for balanced parentheses
+      let parenCount = 0;
+      for (const char of formula) {
+        if (char === '(') parenCount++;
+        if (char === ')') parenCount--;
+        if (parenCount < 0) {
+          return { value, error: 'Unbalanced parentheses in formula' };
+        }
+      }
+      if (parenCount !== 0) {
+        return { value, error: 'Unbalanced parentheses in formula' };
+      }
+      
+      // Check for dangerous patterns
+      if (formula.includes('new Function') || 
+          formula.includes('eval(') || 
+          formula.includes('window.') || 
+          formula.includes('document.')) {
+        return { value: '', error: 'Invalid formula: contains dangerous patterns' };
+      }
+    }
+    
+    return { value };
   };
 
   const handleMouseDown = (row: number, col: number, e: React.MouseEvent) => {
@@ -403,14 +744,15 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
     }
   };
 
-  const handleMouseUp = () => {
+  const handleMouseUp = useCallback(() => {
     setIsSelecting(false);
-  };
+  }, []);
 
   useEffect(() => {
-    window.addEventListener('mouseup', handleMouseUp);
-    return () => window.removeEventListener('mouseup', handleMouseUp);
-  }, []);
+    const handleMouseUpWrapper = () => handleMouseUp();
+    window.addEventListener('mouseup', handleMouseUpWrapper);
+    return () => window.removeEventListener('mouseup', handleMouseUpWrapper);
+  }, [handleMouseUp]);
 
   // FIX #6: Arrow key navigation
   const handleGridKeyDown = (e: React.KeyboardEvent) => {
@@ -529,18 +871,20 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
   }, [selectionRange, cells, copyCells]);
 
   const pasteCells = useCallback(() => {
-    if (!selectedCell) return;
+    // Capture current selectedCell to avoid race condition
+    const currentSelectedCell = selectedCell;
+    if (!currentSelectedCell) return;
     
     // Try system clipboard first
     navigator.clipboard?.readText().then(text => {
-      if (text && selectedCell) {
+      if (text && currentSelectedCell) {
         const rows = text.split('\n').filter(r => r.length > 0);
         const newCells = cells.map(r => r.map(c => ({ ...c, style: c.style ? { ...c.style } : undefined })));
         for (let r = 0; r < rows.length; r++) {
           const cols = rows[r].split('\t');
           for (let c = 0; c < cols.length; c++) {
-            const targetRow = selectedCell.row + r;
-            const targetCol = selectedCell.col + c;
+            const targetRow = currentSelectedCell.row + r;
+            const targetCol = currentSelectedCell.col + c;
             if (targetRow < numRows && targetCol < numCols) {
               newCells[targetRow][targetCol] = { ...newCells[targetRow][targetCol], value: cols[c] };
             }
@@ -550,12 +894,12 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
       }
     }).catch(() => {
       // Fallback to internal clipboard
-      if (!clipboard) return;
+      if (!clipboard || !currentSelectedCell) return;
       const newCells = cells.map(r => r.map(c => ({ ...c, style: c.style ? { ...c.style } : undefined })));
       for (let r = 0; r < clipboard.range.rows; r++) {
         for (let c = 0; c < clipboard.range.cols; c++) {
-          const targetRow = selectedCell.row + r;
-          const targetCol = selectedCell.col + c;
+          const targetRow = currentSelectedCell.row + r;
+          const targetCol = currentSelectedCell.col + c;
           if (targetRow < numRows && targetCol < numCols) {
             newCells[targetRow][targetCol] = { 
               ...newCells[targetRow][targetCol], 
@@ -772,6 +1116,330 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
 
   const handleExport = () => {
     exportXlsx(cells, fileName);
+  };
+
+  // Feature: Cell Merge Implementation
+  const mergeSelectedCells = () => {
+    if (!selectionRange) return;
+    const { start, end } = selectionRange;
+    const minRow = Math.min(start.row, end.row);
+    const maxRow = Math.max(start.row, end.row);
+    const minCol = Math.min(start.col, end.col);
+    const maxCol = Math.max(start.col, end.col);
+    
+    // Check if already merged
+    const existingMerge = mergedCells.find(m => 
+      m.startRow === minRow && m.startCol === minCol && 
+      m.endRow === maxRow && m.endCol === maxCol
+    );
+    
+    if (existingMerge) {
+      // Unmerge
+      setMergedCells(mergedCells.filter(m => m !== existingMerge));
+    } else {
+      // Merge
+      const newMerge: MergedCell = {
+        startRow: minRow,
+        startCol: minCol,
+        endRow: maxRow,
+        endCol: maxCol
+      };
+      setMergedCells([...mergedCells, newMerge]);
+    }
+    setModal('none');
+  };
+
+  const isCellMerged = (row: number, col: number): MergedCell | null => {
+    return mergedCells.find(m => 
+      row >= m.startRow && row <= m.endRow && 
+      col >= m.startCol && col <= m.endCol
+    ) || null;
+  };
+
+  const isMergeStart = (row: number, col: number): boolean => {
+    return mergedCells.some(m => m.startRow === row && m.startCol === col);
+  };
+
+  // Feature: Freeze Panes Implementation
+  const applyFreezePanes = () => {
+    if (!selectedCell) return;
+    setFreezePanes({
+      rows: selectedCell.row,
+      cols: selectedCell.col
+    });
+    setModal('none');
+  };
+
+  const clearFreezePanes = () => {
+    setFreezePanes({ rows: 0, cols: 0 });
+  };
+
+  // Feature: Data Validation Implementation
+  const applyDataValidation = (rule: ValidationRule) => {
+    if (!selectionRange) return;
+    const { start, end } = selectionRange;
+    const minRow = Math.min(start.row, end.row);
+    const maxRow = Math.max(start.row, end.row);
+    const minCol = Math.min(start.col, end.col);
+    const maxCol = Math.max(start.col, end.col);
+    
+    const newRules = new Map(validationRules);
+    for (let r = minRow; r <= maxRow; r++) {
+      for (let c = minCol; c <= maxCol; c++) {
+        newRules.set(`${r}-${c}`, rule);
+      }
+    }
+    setValidationRules(newRules);
+    setModal('none');
+  };
+
+  const validateCell = (row: number, col: number, value: string): boolean => {
+    const rule = validationRules.get(`${row}-${col}`);
+    if (!rule) return true;
+    
+    switch (rule.type) {
+      case 'number':
+        const num = parseFloat(value);
+        if (isNaN(num)) return false;
+        if (rule.operator === 'between' && rule.value1 && rule.value2) {
+          return num >= parseFloat(rule.value1) && num <= parseFloat(rule.value2);
+        }
+        if (rule.operator === 'greaterThan' && rule.value1) {
+          return num > parseFloat(rule.value1);
+        }
+        if (rule.operator === 'lessThan' && rule.value1) {
+          return num < parseFloat(rule.value1);
+        }
+        break;
+      case 'list':
+        if (rule.list && !rule.list.includes(value)) return false;
+        break;
+      case 'text':
+        if (rule.value1 && value.length < parseInt(rule.value1)) return false;
+        if (rule.value2 && value.length > parseInt(rule.value2)) return false;
+        break;
+    }
+    return true;
+  };
+
+  // Feature: Conditional Formatting Implementation
+  const addConditionalFormat = (format: Omit<ConditionalFormat, 'id'>) => {
+    const newFormat: ConditionalFormat = {
+      ...format,
+      id: uuidv4()
+    };
+    setConditionalFormats([...conditionalFormats, newFormat]);
+    setModal('none');
+  };
+
+  const getConditionalStyle = (row: number, col: number): Partial<CellStyle> => {
+    for (const format of conditionalFormats) {
+      if (row >= format.range.startRow && row <= format.range.endRow &&
+          col >= format.range.startCol && col <= format.range.endCol) {
+        const cell = cells[row][col];
+        const value = parseFloat(cell.value);
+        
+        if (format.type === 'cellValue' && format.condition) {
+          const { operator, value: condValue, value2 } = format.condition;
+          let matches = false;
+          
+          switch (operator) {
+            case 'greaterThan':
+              matches = value > parseFloat(condValue || '0');
+              break;
+            case 'lessThan':
+              matches = value < parseFloat(condValue || '0');
+              break;
+            case 'between':
+              matches = value >= parseFloat(condValue || '0') && value <= parseFloat(value2 || '0');
+              break;
+            case 'equal':
+              matches = value === parseFloat(condValue || '0');
+              break;
+          }
+          
+          if (matches) {
+            return format.style;
+          }
+        }
+      }
+    }
+    return {};
+  };
+
+  // Feature: Named Ranges Implementation
+  const addNamedRange = (name: string) => {
+    if (!selectionRange || !name.trim()) return;
+    const { start, end } = selectionRange;
+    const newRange: NamedRange = {
+      name: name.trim(),
+      range: {
+        startRow: Math.min(start.row, end.row),
+        startCol: Math.min(start.col, end.col),
+        endRow: Math.max(start.row, end.row),
+        endCol: Math.max(start.col, end.col)
+      },
+      sheetId: activeSheet.id
+    };
+    setNamedRanges([...namedRanges, newRange]);
+    setModal('none');
+  };
+
+  const getNamedRange = (name: string): NamedRange | undefined => {
+    return namedRanges.find(r => r.name === name);
+  };
+
+  // Feature: Auto-Fill Implementation
+  const autoFillCells = (startRow: number, startCol: number, endRow: number, endCol: number) => {
+    const sourceValue = cells[startRow][startCol].value;
+    const sourceNum = parseFloat(sourceValue);
+    const isNumber = !isNaN(sourceNum);
+    
+    const newCells = cells.map(r => r.map(c => ({ ...c })));
+    
+    if (isNumber) {
+      // Numeric auto-fill with increment
+      const step = 1;
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+          if (r === startRow && c === startCol) continue;
+          const offset = (r - startRow) + (c - startCol);
+          newCells[r][c] = { ...newCells[r][c], value: (sourceNum + offset * step).toString() };
+        }
+      }
+    } else {
+      // Text auto-fill (copy)
+      for (let r = startRow; r <= endRow; r++) {
+        for (let c = startCol; c <= endCol; c++) {
+          if (r === startRow && c === startCol) continue;
+          newCells[r][c] = { ...newCells[r][c], value: sourceValue };
+        }
+      }
+    }
+    
+    updateCells(newCells);
+  };
+
+  // Feature: Cell Protection Implementation
+  const toggleCellProtection = () => {
+    if (!selectionRange) return;
+    const { start, end } = selectionRange;
+    const minRow = Math.min(start.row, end.row);
+    const maxRow = Math.max(start.row, end.row);
+    const minCol = Math.min(start.col, end.col);
+    const maxCol = Math.max(start.col, end.col);
+    
+    const newProtected = new Set(protectedCells);
+    for (let r = minRow; r <= maxRow; r++) {
+      for (let c = minCol; c <= maxCol; c++) {
+        const key = `${r}-${c}`;
+        if (newProtected.has(key)) {
+          newProtected.delete(key);
+        } else {
+          newProtected.add(key);
+        }
+      }
+    }
+    setProtectedCells(newProtected);
+  };
+
+  const isCellProtected = (row: number, col: number): boolean => {
+    return sheetProtected && protectedCells.has(`${row}-${col}`);
+  };
+
+  // Feature: CSV Import Implementation
+  const importCSV = (csvText: string) => {
+    const lines = csvText.trim().split('\n');
+    const newCells: SpreadsheetCell[][] = [];
+    
+    for (const line of lines) {
+      const row: SpreadsheetCell[] = [];
+      // Simple CSV parsing (handles commas in quotes)
+      const cells = line.match(/("([^"]|"")*"|[^,]*)(,|$)/g) || [];
+      for (const cell of cells) {
+        let value = cell.replace(/,$/, '').trim();
+        // Remove quotes
+        if (value.startsWith('"') && value.endsWith('"')) {
+          value = value.slice(1, -1).replace(/""/g, '"');
+        }
+        row.push({ value });
+      }
+      newCells.push(row);
+    }
+    
+    // Pad rows to same length
+    const maxCols = Math.max(...newCells.map(r => r.length));
+    for (const row of newCells) {
+      while (row.length < maxCols) {
+        row.push({ value: '' });
+      }
+    }
+    
+    updateCells(newCells);
+    setModal('none');
+  };
+
+  // Feature: Print Implementation
+  const handlePrint = () => {
+    window.print();
+  };
+
+  // Feature: Sparklines Implementation
+  const addSparkline = (type: 'line' | 'column' | 'winLoss') => {
+    if (!selectedCell || !selectionRange) return;
+    const { start, end } = selectionRange;
+    
+    const newSparkline: Sparkline = {
+      cell: { row: selectedCell.row, col: selectedCell.col },
+      dataRange: {
+        startRow: Math.min(start.row, end.row),
+        startCol: Math.min(start.col, end.col),
+        endRow: Math.max(start.row, end.row),
+        endCol: Math.max(start.col, end.col)
+      },
+      type
+    };
+    
+    setSparklines([...sparklines, newSparkline]);
+    setModal('none');
+  };
+
+  const renderSparkline = (sparkline: Sparkline): string => {
+    const values: number[] = [];
+    for (let r = sparkline.dataRange.startRow; r <= sparkline.dataRange.endRow; r++) {
+      for (let c = sparkline.dataRange.startCol; c <= sparkline.dataRange.endCol; c++) {
+        const val = parseFloat(cells[r][c].value);
+        if (!isNaN(val)) values.push(val);
+      }
+    }
+    
+    if (values.length === 0) return '';
+    
+    const max = Math.max(...values);
+    const min = Math.min(...values);
+    const range = max - min || 1;
+    
+    if (sparkline.type === 'line') {
+      const points = values.map((v, i) => {
+        const x = (i / (values.length - 1)) * 60;
+        const y = 20 - ((v - min) / range) * 20;
+        return `${x},${y}`;
+      }).join(' ');
+      return `<svg width="60" height="20" style="vertical-align: middle;"><polyline points="${points}" fill="none" stroke="#3b82f6" stroke-width="1.5"/></svg>`;
+    }
+    
+    if (sparkline.type === 'column') {
+      const barWidth = 60 / values.length;
+      const bars = values.map((v, i) => {
+        const height = ((v - min) / range) * 20;
+        const x = i * barWidth;
+        const y = 20 - height;
+        return `<rect x="${x}" y="${y}" width="${barWidth - 1}" height="${height}" fill="#3b82f6"/>`;
+      }).join('');
+      return `<svg width="60" height="20" style="vertical-align: middle;">${bars}</svg>`;
+    }
+    
+    return '';
   };
 
   const getDisplayValue = (cell: SpreadsheetCell): string => {
@@ -1073,7 +1741,7 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                 <ToolbarButton icon={AlignRight} action={() => updateSelectedCellsStyle({ align: 'right' })} title="Align Right" active={selectedCellStyle.align === 'right'} />
                 <ToolbarDivider />
                 <ToolbarButton icon={WrapText} action={() => updateSelectedCellsStyle({ wrapText: !selectedCellStyle.wrapText })} title="Wrap Text" active={selectedCellStyle.wrapText} />
-                <ToolbarButton icon={Merge} action={() => {/* TODO: merge implementation */}} title="Merge Cells" />
+                <ToolbarButton icon={Merge} action={() => setModal('mergeCells')} title="Merge Cells" active={mergeMode} />
               </div>
               <span className="text-[10px] text-gray-500 mt-0.5">Alignment</span>
             </div>
@@ -1132,6 +1800,11 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
               <MessageSquare className="w-5 h-5 text-yellow-500" />
               <span className="text-[10px] text-gray-500 mt-0.5">Comment</span>
             </button>
+            <ToolbarDivider />
+            <button onClick={() => addSparkline('line')} className="flex flex-col items-center px-3 py-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800" title="Insert Line Sparkline">
+              <TrendingUp className="w-5 h-5 text-purple-500" />
+              <span className="text-[10px] text-gray-500 mt-0.5">Sparkline</span>
+            </button>
           </div>
         )}
 
@@ -1149,6 +1822,7 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                   onClick={() => {
                     if (selectedCell && selectionRange) {
                       const { start, end } = selectionRange;
+                      // Convert from 0-indexed to 1-indexed for display
                       const minRow = Math.min(start.row, end.row) + 1;
                       const maxRow = Math.max(start.row, end.row) + 1;
                       const minCol = getColName(Math.min(start.col, end.col));
@@ -1160,6 +1834,7 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                     }
                   }}
                   className="px-2 py-1 text-xs bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded font-mono"
+                  title={`Insert ${fn} function`}
                 >
                   {fn}
                 </button>
@@ -1189,6 +1864,16 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
             <button onClick={() => setModal('findReplace')} className="flex items-center gap-1 px-3 py-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-sm">
               <Search className="w-4 h-4" /> Find & Replace
             </button>
+            <ToolbarDivider />
+            <button onClick={() => setModal('dataValidation')} className="flex items-center gap-1 px-3 py-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-sm">
+              <FileText className="w-4 h-4" /> Validation
+            </button>
+            <button onClick={() => setModal('conditionalFormatting')} className="flex items-center gap-1 px-3 py-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-sm">
+              <PaintBucket className="w-4 h-4" /> Conditional
+            </button>
+            <button onClick={() => setModal('namedRanges')} className="flex items-center gap-1 px-3 py-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-sm">
+              <Hash className="w-4 h-4" /> Names
+            </button>
           </div>
         )}
 
@@ -1196,6 +1881,22 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
           <div className="flex items-center gap-0.5 flex-wrap">
             <ToolbarButton icon={showGridlines ? Grid3x3 : Grid2x2} action={() => setShowGridlines(!showGridlines)} title="Toggle Gridlines" active={showGridlines} />
             <ToolbarButton icon={showFormulaBar ? Eye : EyeOff} action={() => setShowFormulaBar(!showFormulaBar)} title="Toggle Formula Bar" active={showFormulaBar} />
+            <ToolbarDivider />
+            <button onClick={() => setModal('freezePanes')} className="flex items-center gap-1 px-3 py-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-sm">
+              <Lock className="w-4 h-4" /> Freeze Panes
+            </button>
+            {freezePanes.rows > 0 || freezePanes.cols > 0 ? (
+              <button onClick={clearFreezePanes} className="flex items-center gap-1 px-3 py-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-sm">
+                <Unlock className="w-4 h-4" /> Unfreeze
+              </button>
+            ) : null}
+            <ToolbarDivider />
+            <button onClick={() => setModal('importCSV')} className="flex items-center gap-1 px-3 py-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-sm">
+              <Upload className="w-4 h-4" /> Import CSV
+            </button>
+            <button onClick={handlePrint} className="flex items-center gap-1 px-3 py-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800 text-sm">
+              <Printer className="w-4 h-4" /> Print
+            </button>
             <ToolbarDivider />
             <div className="flex items-center gap-1">
               <button onClick={() => setZoom(Math.max(50, zoom - 10))} className="p-1.5 rounded hover:bg-gray-100 dark:hover:bg-gray-800">
@@ -1261,18 +1962,19 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
         style={{ outline: 'none' }}
       >
         <table className="border-collapse" style={{ fontSize: `${zoom}%` }}>
-            <thead className="sticky top-0 z-10">
+            <thead className={`${freezePanes.rows > 0 ? 'sticky' : ''} top-0 z-10`}>
               <tr>
-                <th className="w-12 min-w-[48px] bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-xs font-medium text-gray-500 dark:text-gray-400 sticky left-0 z-20"></th>
+                <th className={`w-12 min-w-[48px] bg-gray-100 dark:bg-gray-800 border border-gray-300 dark:border-gray-600 text-xs font-medium text-gray-500 dark:text-gray-400 ${freezePanes.cols > 0 ? 'sticky left-0' : ''} z-20`}></th>
                 {Array.from({ length: numCols }, (_, i) => {
                   const isSelected = selectionRange && i >= Math.min(selectionRange.start.col, selectionRange.end.col) && i <= Math.max(selectionRange.start.col, selectionRange.end.col);
+                  const isFrozen = i < freezePanes.cols;
                   return (
                     <th
                       key={i}
                       className={`min-w-[100px] border border-gray-300 dark:border-gray-600 text-xs font-medium px-2 py-1.5 text-center ${
                         isSelected ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300' : 'bg-gray-100 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
-                      }`}
-                      style={{ width: activeSheet.colWidths[i] || 100 }}
+                      } ${isFrozen ? 'bg-blue-50 dark:bg-blue-900/20' : ''}`}
+                      style={{ width: activeSheet.colWidths[i] || 100, ...(isFrozen ? { position: 'sticky', left: `${(i * 100) + 48}px`, zIndex: 15 } : {}) }}
                     >
                       {getColName(i)}
                     </th>
@@ -1283,10 +1985,11 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
             <tbody>
               {cells.map((row, rowIdx) => {
                 const isRowSelected = selectionRange && rowIdx >= Math.min(selectionRange.start.row, selectionRange.end.row) && rowIdx <= Math.max(selectionRange.start.row, selectionRange.end.row);
+                const isFrozenRow = rowIdx < freezePanes.rows;
                 return (
-                  <tr key={rowIdx}>
-                    <td className={`w-12 min-w-[48px] border border-gray-300 dark:border-gray-600 text-xs font-medium text-center py-0.5 sticky left-0 z-10 ${
-                      isRowSelected ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300' : 'bg-gray-50 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
+                  <tr key={rowIdx} className={isFrozenRow ? 'sticky' : ''} style={isFrozenRow ? { top: '28px', zIndex: 5 } : {}}>
+                    <td className={`w-12 min-w-[48px] border border-gray-300 dark:border-gray-600 text-xs font-medium text-center py-0.5 ${freezePanes.cols > 0 ? 'sticky left-0' : ''} z-10 ${
+                      isRowSelected ? 'bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300' : isFrozenRow ? 'bg-blue-50 dark:bg-blue-900/20 text-gray-500 dark:text-gray-400' : 'bg-gray-50 dark:bg-gray-800 text-gray-500 dark:text-gray-400'
                     }`}>
                       {rowIdx + 1}
                     </td>
@@ -1299,6 +2002,22 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                       const isCurrentFind = findMatches[findIdx]?.row === rowIdx && findMatches[findIdx]?.col === colIdx;
                       const hasComment = !!cell.comment;
                       const isError = displayValue === '#ERROR';
+                      const isProtected = isCellProtected(rowIdx, colIdx);
+                      
+                      // Feature: Check if cell is part of a merge
+                      const mergedCell = isCellMerged(rowIdx, colIdx);
+                      const isMergeStartCell = isMergeStart(rowIdx, colIdx);
+                      
+                      // Skip rendering if this cell is part of a merge but not the start
+                      if (mergedCell && !isMergeStartCell) {
+                        return null;
+                      }
+
+                      // Feature: Get conditional formatting style
+                      const conditionalStyle = getConditionalStyle(rowIdx, colIdx);
+                      
+                      // Feature: Check for sparkline
+                      const sparkline = sparklines.find(s => s.cell.row === rowIdx && s.cell.col === colIdx);
 
                       const borderStyle = cell.style?.borders;
                       const cellBorders = {
@@ -1308,26 +2027,32 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                         borderLeft: borderStyle?.left?.style !== 'none' ? `${borderStyle?.left?.width || '1px'} ${borderStyle?.left?.style || (showGridlines ? 'solid' : 'none')} ${borderStyle?.left?.color || (showGridlines ? '#d1d5db' : 'transparent')}` : 'none',
                       };
 
+                      // Calculate colspan and rowspan for merged cells
+                      const colSpan = mergedCell ? (mergedCell.endCol - mergedCell.startCol + 1) : 1;
+                      const rowSpan = mergedCell ? (mergedCell.endRow - mergedCell.startRow + 1) : 1;
+
                       return (
                         <td
                           key={colIdx}
                           data-row={rowIdx}
                           data-col={colIdx}
-                          onClick={(e) => handleCellClick(rowIdx, colIdx, e)}
-                          onDoubleClick={() => handleCellDoubleClick(rowIdx, colIdx)}
-                          onMouseDown={(e) => handleMouseDown(rowIdx, colIdx, e)}
+                          onClick={(e) => !isProtected && handleCellClick(rowIdx, colIdx, e)}
+                          onDoubleClick={() => !isProtected && handleCellDoubleClick(rowIdx, colIdx)}
+                          onMouseDown={(e) => !isProtected && handleMouseDown(rowIdx, colIdx, e)}
                           onMouseEnter={() => handleMouseEnter(rowIdx, colIdx)}
+                          colSpan={colSpan}
+                          rowSpan={rowSpan}
                           className={`relative px-1 py-0.5 text-sm cursor-cell ${
                             isSelected ? 'ring-2 ring-blue-500 ring-inset' : ''
-                          } ${isCurrentFind ? 'bg-yellow-300 dark:bg-yellow-700' : isMatch ? 'bg-yellow-100 dark:bg-yellow-900' : ''} ${isError ? 'text-red-500' : ''}`}
+                          } ${isCurrentFind ? 'bg-yellow-300 dark:bg-yellow-700' : isMatch ? 'bg-yellow-100 dark:bg-yellow-900' : ''} ${isError ? 'text-red-500' : ''} ${isProtected ? 'bg-gray-100 dark:bg-gray-800 cursor-not-allowed' : ''}`}
                           style={{
                             fontWeight: cell.style?.bold ? 'bold' : 'normal',
                             fontStyle: cell.style?.italic ? 'italic' : 'normal',
                             textDecoration: [cell.style?.underline ? 'underline' : '', cell.style?.strikethrough ? 'line-through' : ''].filter(Boolean).join(' ') || 'none',
                             textAlign: cell.style?.align || 'left',
                             verticalAlign: cell.style?.verticalAlign || 'middle',
-                            backgroundColor: isSelected ? undefined : (cell.style?.backgroundColor || (inSelection ? '#dbeafe' : undefined)),
-                            color: isError ? undefined : cell.style?.color,
+                            backgroundColor: conditionalStyle.backgroundColor || cell.style?.backgroundColor || (isSelected ? '#dbeafe' : (inSelection ? '#dbeafe' : undefined)),
+                            color: isError ? undefined : (conditionalStyle.color || cell.style?.color),
                             fontSize: cell.style?.fontSize ? `${cell.style.fontSize}px` : undefined,
                             fontFamily: cell.style?.fontFamily,
                             whiteSpace: cell.style?.wrapText ? 'normal' : 'nowrap',
@@ -1336,7 +2061,7 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                             minWidth: activeSheet.colWidths[colIdx] || 100,
                             ...cellBorders,
                           }}
-                          title={hasComment ? cell.comment : isError ? 'Formula error' : undefined}
+                          title={hasComment ? cell.comment : isError ? 'Formula error' : isProtected ? 'Cell is protected' : undefined}
                         >
                           {isEditing ? (
                             <input
@@ -1348,11 +2073,18 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                               className="w-full h-full absolute inset-0 px-1 text-sm border-none outline-none bg-white dark:bg-gray-900"
                               autoFocus
                             />
+                          ) : sparkline ? (
+                            <span dangerouslySetInnerHTML={{ __html: renderSparkline(sparkline) }} />
                           ) : (
                             <span className="block truncate">{displayValue}</span>
                           )}
                           {hasComment && (
                             <div className="absolute top-0 right-0 w-0 h-0 border-l-[6px] border-l-red-500 border-b-[6px] border-b-transparent"></div>
+                          )}
+                          {isProtected && (
+                            <div className="absolute top-0 left-0 w-3 h-3">
+                              <Lock className="w-3 h-3 text-gray-400" />
+                            </div>
                           )}
                         </td>
                       );
@@ -1378,8 +2110,14 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
             const newSheets = [...sheets, newSheet];
             setSheets(newSheets);
             setActiveSheetIdx(sheets.length);
+            // Clear selection when adding new sheet
+            setSelectedCell(null);
+            setSelectionRange(null);
+            setEditingCell(null);
             // FIX #19: Notify parent
             onChange(newSheet.cells);
+            // Add to history so undo/redo works
+            pushHistory(newSheet.cells);
           }}
           className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded"
           title="Add Sheet"
@@ -1391,6 +2129,10 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
             key={sheet.id}
             onClick={() => {
               setActiveSheetIdx(idx);
+              // Clear selection when switching sheets
+              setSelectedCell(null);
+              setSelectionRange(null);
+              setEditingCell(null);
               onChange(sheet.cells);
             }}
             className={`px-3 py-1 text-sm rounded-t border-b-2 ${
@@ -1516,6 +2258,7 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
                   onClick={() => {
                     if (selectedCell && selectionRange) {
                       const { start, end } = selectionRange;
+                      // Convert from 0-indexed to 1-indexed for display
                       const minRow = Math.min(start.row, end.row) + 1;
                       const maxRow = Math.max(start.row, end.row) + 1;
                       const minCol = getColName(Math.min(start.col, end.col));
@@ -1648,6 +2391,333 @@ export default function SpreadsheetEditor({ content, onChange, fileName, readOnl
           </div>
         </div>
       )}
+
+      {/* Feature: Merge Cells Modal */}
+      {modal === 'mergeCells' && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={(e) => { if (e.target === e.currentTarget) setModal('none'); }}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="font-semibold">Merge Cells</h3>
+              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                {selectionRange ? (
+                  <>
+                    Selected range: {getColName(Math.min(selectionRange.start.col, selectionRange.end.col))}
+                    {Math.min(selectionRange.start.row, selectionRange.end.row) + 1}:
+                    {getColName(Math.max(selectionRange.start.col, selectionRange.end.col))}
+                    {Math.max(selectionRange.start.row, selectionRange.end.row) + 1}
+                  </>
+                ) : (
+                  'Please select a range of cells to merge.'
+                )}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={mergeSelectedCells}
+                  disabled={!selectionRange}
+                  className="flex-1 px-3 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white rounded text-sm font-medium"
+                >
+                  {mergedCells.some(m => 
+                    selectionRange && 
+                    m.startRow === Math.min(selectionRange.start.row, selectionRange.end.row) &&
+                    m.startCol === Math.min(selectionRange.start.col, selectionRange.end.col)
+                  ) ? 'Unmerge' : 'Merge'}
+                </button>
+                <button
+                  onClick={() => setModal('none')}
+                  className="px-3 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-sm"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Feature: Freeze Panes Modal */}
+      {modal === 'freezePanes' && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={(e) => { if (e.target === e.currentTarget) setModal('none'); }}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="font-semibold">Freeze Panes</h3>
+              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                {selectedCell ? (
+                  <>
+                    Freeze at cell: {getColName(selectedCell.col)}{selectedCell.row + 1}
+                    <br />
+                    This will freeze {selectedCell.row} row{selectedCell.row !== 1 ? 's' : ''} and {selectedCell.col} column{selectedCell.col !== 1 ? 's' : ''}.
+                  </>
+                ) : (
+                  'Please select a cell to freeze panes at.'
+                )}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={applyFreezePanes}
+                  disabled={!selectedCell}
+                  className="flex-1 px-3 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white rounded text-sm font-medium"
+                >
+                  Freeze
+                </button>
+                <button
+                  onClick={() => setModal('none')}
+                  className="px-3 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-sm"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Feature: Import CSV Modal */}
+      {modal === 'importCSV' && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={(e) => { if (e.target === e.currentTarget) setModal('none'); }}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="font-semibold">Import CSV</h3>
+              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Select CSV File</label>
+                <input
+                  type="file"
+                  accept=".csv,.txt"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) {
+                      const reader = new FileReader();
+                      reader.onload = (event) => {
+                        const text = event.target?.result as string;
+                        importCSV(text);
+                      };
+                      reader.readAsText(file);
+                    }
+                  }}
+                  className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent"
+                />
+              </div>
+              <p className="text-xs text-gray-500">
+                Supports CSV and TXT files. Data will replace current sheet content.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Feature: Data Validation Modal */}
+      {modal === 'dataValidation' && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={(e) => { if (e.target === e.currentTarget) setModal('none'); }}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="font-semibold">Data Validation</h3>
+              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                Set validation rules for selected cells.
+              </p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => applyDataValidation({ type: 'number', operator: 'greaterThan', value1: '0' })}
+                  className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-sm text-left"
+                >
+                  Number &gt; 0
+                </button>
+                <button
+                  onClick={() => applyDataValidation({ type: 'number', operator: 'between', value1: '0', value2: '100' })}
+                  className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-sm text-left"
+                >
+                  Number between 0-100
+                </button>
+                <button
+                  onClick={() => applyDataValidation({ type: 'text', value1: '1', value2: '100' })}
+                  className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-sm text-left"
+                >
+                  Text length 1-100
+                </button>
+                <button
+                  onClick={() => {
+                    if (validationRules.size > 0) {
+                      setValidationRules(new Map());
+                      setModal('none');
+                    }
+                  }}
+                  className="w-full px-3 py-2 bg-red-50 dark:bg-red-900/30 hover:bg-red-100 dark:hover:bg-red-900/50 text-red-600 dark:text-red-400 rounded text-sm text-left"
+                >
+                  Clear All Validation
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Feature: Conditional Formatting Modal */}
+      {modal === 'conditionalFormatting' && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={(e) => { if (e.target === e.currentTarget) setModal('none'); }}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="font-semibold">Conditional Formatting</h3>
+              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <p className="text-sm text-gray-600 dark:text-gray-400">
+                Apply formatting based on cell values.
+              </p>
+              <div className="space-y-2">
+                <button
+                  onClick={() => {
+                    if (selectionRange) {
+                      const { start, end } = selectionRange;
+                      addConditionalFormat({
+                        range: {
+                          startRow: Math.min(start.row, end.row),
+                          startCol: Math.min(start.col, end.col),
+                          endRow: Math.max(start.row, end.row),
+                          endCol: Math.max(start.col, end.col)
+                        },
+                        type: 'cellValue',
+                        condition: { operator: 'greaterThan', value: '0' },
+                        style: { backgroundColor: '#dcfce7', color: '#166534' }
+                      });
+                    }
+                  }}
+                  className="w-full px-3 py-2 bg-green-100 hover:bg-green-200 text-green-800 rounded text-sm text-left"
+                >
+                  Highlight cells &gt; 0 (Green)
+                </button>
+                <button
+                  onClick={() => {
+                    if (selectionRange) {
+                      const { start, end } = selectionRange;
+                      addConditionalFormat({
+                        range: {
+                          startRow: Math.min(start.row, end.row),
+                          startCol: Math.min(start.col, end.col),
+                          endRow: Math.max(start.row, end.row),
+                          endCol: Math.max(start.col, end.col)
+                        },
+                        type: 'cellValue',
+                        condition: { operator: 'lessThan', value: '0' },
+                        style: { backgroundColor: '#fee2e2', color: '#991b1b' }
+                      });
+                    }
+                  }}
+                  className="w-full px-3 py-2 bg-red-100 hover:bg-red-200 text-red-800 rounded text-sm text-left"
+                >
+                  Highlight cells &lt; 0 (Red)
+                </button>
+                <button
+                  onClick={() => {
+                    setConditionalFormats([]);
+                    setModal('none');
+                  }}
+                  className="w-full px-3 py-2 bg-gray-100 dark:bg-gray-800 hover:bg-gray-200 dark:hover:bg-gray-700 rounded text-sm text-left"
+                >
+                  Clear All Formatting
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Feature: Named Ranges Modal */}
+      {modal === 'namedRanges' && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" onClick={(e) => { if (e.target === e.currentTarget) setModal('none'); }}>
+          <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+            <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
+              <h3 className="font-semibold">Named Ranges</h3>
+              <button onClick={() => setModal('none')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-4 space-y-3">
+              <div>
+                <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Range Name</label>
+                <input
+                  type="text"
+                  id="rangeName"
+                  placeholder="e.g., SalesData"
+                  className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                />
+              </div>
+              <p className="text-xs text-gray-500">
+                {selectionRange ? (
+                  <>
+                    Selected range: {getColName(Math.min(selectionRange.start.col, selectionRange.end.col))}
+                    {Math.min(selectionRange.start.row, selectionRange.end.row) + 1}:
+                    {getColName(Math.max(selectionRange.start.col, selectionRange.end.col))}
+                    {Math.max(selectionRange.start.row, selectionRange.end.row) + 1}
+                  </>
+                ) : (
+                  'Please select a range first.'
+                )}
+              </p>
+              {namedRanges.length > 0 && (
+                <div className="mt-3">
+                  <h4 className="text-sm font-medium mb-2">Existing Ranges:</h4>
+                  <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {namedRanges.map((range, idx) => (
+                      <div key={idx} className="flex items-center justify-between text-xs bg-gray-50 dark:bg-gray-800 rounded px-2 py-1">
+                        <span className="font-mono">{range.name}</span>
+                        <button
+                          onClick={() => {
+                            setNamedRanges(namedRanges.filter((_, i) => i !== idx));
+                          }}
+                          className="text-red-500 hover:text-red-700"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <button
+                onClick={() => {
+                  const input = document.getElementById('rangeName') as HTMLInputElement;
+                  if (input && input.value) {
+                    addNamedRange(input.value);
+                  }
+                }}
+                disabled={!selectionRange}
+                className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 disabled:bg-gray-300 text-white rounded text-sm font-medium"
+              >
+                Add Named Range
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
+  );
+}
+
+// Export with error boundary wrapper
+export default function SpreadsheetEditor(props: SpreadsheetEditorProps) {
+  return (
+    <SpreadsheetErrorBoundary>
+      <SpreadsheetEditorInner {...props} />
+    </SpreadsheetErrorBoundary>
   );
 }
