@@ -1135,47 +1135,134 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   };
 
   const setCellBackgroundColor = (color: string) => {
-    const cell = getSelectedTableCell();
-    if (!cell) return;
+    const cells = getSelectedTableCells();
+    if (cells.length === 0) return;
     
-    cell.style.backgroundColor = color;
+    // Apply color to all selected cells
+    cells.forEach(cell => {
+      cell.style.backgroundColor = color;
+    });
     
     if (editorRef.current) {
       onChange(editorRef.current.innerHTML);
     }
-    addToast('Cell background color applied', 'success');
+    addToast(`Background color applied to ${cells.length} cell${cells.length > 1 ? 's' : ''}`, 'success');
   };
 
   const clearCellBackgroundColor = () => {
-    const cell = getSelectedTableCell();
-    if (!cell) return;
+    const cells = getSelectedTableCells();
+    if (cells.length === 0) return;
     
-    cell.style.backgroundColor = '';
+    // Clear color from all selected cells
+    cells.forEach(cell => {
+      cell.style.backgroundColor = '';
+    });
     
     if (editorRef.current) {
       onChange(editorRef.current.innerHTML);
     }
-    addToast('Cell background color cleared', 'success');
+    addToast(`Background color cleared from ${cells.length} cell${cells.length > 1 ? 's' : ''}`, 'success');
   };
 
   // Table selection state
   const [selectedTableCell, setSelectedTableCell] = useState<HTMLTableCellElement | null>(null);
+  const [selectedTableCells, setSelectedTableCells] = useState<Set<HTMLTableCellElement>>(new Set());
+  const [isSelectingCells, setIsSelectingCells] = useState(false);
   const [showTableToolbar, setShowTableToolbar] = useState(false);
   const [showCellColorPicker, setShowCellColorPicker] = useState(false);
+
+  // Get all selected table cells (supports multi-cell selection)
+  const getSelectedTableCells = (): HTMLTableCellElement[] => {
+    if (selectedTableCells.size > 0) {
+      return Array.from(selectedTableCells);
+    }
+    const cell = getSelectedTableCell();
+    return cell ? [cell] : [];
+  };
 
   // Update table selection on cursor movement
   useEffect(() => {
     const handleSelectionChange = () => {
+      // Don't update if we're in multi-cell selection mode
+      if (isSelectingCells) return;
+      
       const cell = getSelectedTableCell();
       if (cell !== selectedTableCell) {
         setSelectedTableCell(cell);
+        setSelectedTableCells(new Set()); // Clear multi-selection when cursor moves
         setShowTableToolbar(!!cell);
       }
     };
 
     document.addEventListener('selectionchange', handleSelectionChange);
     return () => document.removeEventListener('selectionchange', handleSelectionChange);
-  }, [selectedTableCell]);
+  }, [selectedTableCell, isSelectingCells]);
+
+  // Handle cell click for multi-selection (with Ctrl/Cmd key)
+  const handleTableCellClick = (e: React.MouseEvent, cell: HTMLTableCellElement) => {
+    if (e.ctrlKey || e.metaKey) {
+      // Multi-select mode: toggle cell in selection
+      e.preventDefault();
+      const newSelection = new Set(selectedTableCells);
+      if (newSelection.has(cell)) {
+        newSelection.delete(cell);
+      } else {
+        newSelection.add(cell);
+      }
+      setSelectedTableCells(newSelection);
+      setIsSelectingCells(newSelection.size > 0);
+      setShowTableToolbar(newSelection.size > 0 || !!getSelectedTableCell());
+    } else {
+      // Single select mode: clear multi-selection
+      setSelectedTableCells(new Set());
+      setIsSelectingCells(false);
+    }
+  };
+
+  // Handle drag selection for table cells
+  const handleTableCellMouseDown = (e: React.MouseEvent, cell: HTMLTableCellElement) => {
+    if (e.button === 0 && !e.ctrlKey && !e.metaKey) {
+      // Start drag selection
+      setIsSelectingCells(true);
+      const newSelection = new Set<HTMLTableCellElement>();
+      newSelection.add(cell);
+      setSelectedTableCells(newSelection);
+      setShowTableToolbar(true);
+    }
+  };
+
+  const handleTableCellMouseEnter = (e: React.MouseEvent, cell: HTMLTableCellElement) => {
+    if (isSelectingCells && e.buttons === 1) {
+      // Add cell to selection during drag
+      const newSelection = new Set(selectedTableCells);
+      newSelection.add(cell);
+      setSelectedTableCells(newSelection);
+    }
+  };
+
+  const handleTableCellMouseUp = () => {
+    if (isSelectingCells && selectedTableCells.size === 0) {
+      setIsSelectingCells(false);
+    }
+  };
+
+  // Update visual selection state for table cells
+  useEffect(() => {
+    if (!editorRef.current) return;
+    
+    // Remove selection highlight from all cells
+    const allCells = editorRef.current.querySelectorAll('td, th');
+    allCells.forEach(cell => {
+      (cell as HTMLElement).style.outline = '';
+      (cell as HTMLElement).style.outlineOffset = '';
+    });
+    
+    // Add selection highlight to selected cells
+    selectedTableCells.forEach(cell => {
+      cell.style.outline = '2px solid #3b82f6';
+      cell.style.outlineOffset = '-2px';
+    });
+  }, [selectedTableCells]);
 
   const insertPageBreak = () => {
     execCommand('insertHTML', '<div style="page-break-after: always; border-top: 2px dashed #9ca3af; margin: 2em 0; padding-top: 4px;"><span style="font-size: 10px; color: #9ca3af;">— Page Break —</span></div><p><br></p>');
@@ -1892,10 +1979,12 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       </div>
 
       {/* Table Editing Toolbar - Shows when cursor is in a table */}
-      {showTableToolbar && selectedTableCell && (
+      {showTableToolbar && (selectedTableCell || selectedTableCells.size > 0) && (
         <div className="bg-blue-50 dark:bg-blue-900/20 border-b border-blue-200 dark:border-blue-800 px-2 py-1.5">
           <div className="flex items-center gap-0.5 flex-wrap">
-            <span className="text-xs font-medium text-blue-700 dark:text-blue-300 mr-2">Table:</span>
+            <span className="text-xs font-medium text-blue-700 dark:text-blue-300 mr-2">
+              Table{selectedTableCells.size > 1 ? ` (${selectedTableCells.size} cells selected)` : ':'}
+            </span>
             
             {/* Row Operations */}
             <ToolbarButton icon={Plus} action={() => addTableRow('above')} title="Add Row Above" />
@@ -2051,6 +2140,28 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             ref={editorRef}
             contentEditable={!readOnly && !documentProtected}
             onInput={handleInput}
+            onMouseUp={handleTableCellMouseUp}
+            onClick={(e) => {
+              // Handle Ctrl/Cmd+Click for multi-selection
+              const target = e.target as HTMLElement;
+              if (target.tagName === 'TD' || target.tagName === 'TH') {
+                handleTableCellClick(e, target as HTMLTableCellElement);
+              }
+            }}
+            onMouseDown={(e) => {
+              // Handle drag selection
+              const target = e.target as HTMLElement;
+              if (target.tagName === 'TD' || target.tagName === 'TH') {
+                handleTableCellMouseDown(e, target as HTMLTableCellElement);
+              }
+            }}
+            onMouseMove={(e) => {
+              // Handle drag selection
+              const target = e.target as HTMLElement;
+              if (target.tagName === 'TD' || target.tagName === 'TH') {
+                handleTableCellMouseEnter(e, target as HTMLTableCellElement);
+              }
+            }}
             className="prose prose-lg dark:prose-invert max-w-none p-16 md:p-24 min-h-[1056px] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
             suppressContentEditableWarning
             style={{ lineHeight: '1.8' }}

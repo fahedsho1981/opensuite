@@ -2051,7 +2051,7 @@ function SpreadsheetEditorInner({ content, onChange, fileName, readOnly = false 
                             textDecoration: [cell.style?.underline ? 'underline' : '', cell.style?.strikethrough ? 'line-through' : ''].filter(Boolean).join(' ') || 'none',
                             textAlign: cell.style?.align || 'left',
                             verticalAlign: cell.style?.verticalAlign || 'middle',
-                            backgroundColor: isSelected ? undefined : (conditionalStyle.backgroundColor || cell.style?.backgroundColor || (inSelection ? '#dbeafe' : undefined)),
+                            backgroundColor: conditionalStyle.backgroundColor || cell.style?.backgroundColor || (isSelected ? '#dbeafe' : (inSelection ? '#dbeafe' : undefined)),
                             color: isError ? undefined : (conditionalStyle.color || cell.style?.color),
                             fontSize: cell.style?.fontSize ? `${cell.style.fontSize}px` : undefined,
                             fontFamily: cell.style?.fontFamily,
