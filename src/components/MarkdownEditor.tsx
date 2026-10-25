@@ -21,6 +21,7 @@ export default function MarkdownEditor({ content, onChange, fileName, readOnly =
   const [isCollaborating, setIsCollaborating] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const service = getCollaborationService();
+  const isRemoteChange = useRef(false); // Prevent infinite loops
 
   // Initialize collaboration
   useEffect(() => {
@@ -36,24 +37,40 @@ export default function MarkdownEditor({ content, onChange, fileName, readOnly =
         ytext.insert(0, content);
       }
 
-      // Listen for Yjs changes → update editor
+      // Listen for Yjs changes → update editor (REMOTE changes)
       const observer = () => {
         const newContent = ytext.toString();
-        if (newContent !== content) {
+        // Only update if this is a remote change (not from local input)
+        if (newContent !== content && !isRemoteChange.current) {
+          isRemoteChange.current = true;
           onChange(newContent);
+          // Reset flag after React processes the update
+          requestAnimationFrame(() => {
+            isRemoteChange.current = false;
+          });
         }
       };
       ytext.observe(observer);
 
-      // Listen for editor changes → update Yjs
+      // Listen for editor changes → update Yjs (LOCAL changes)
       const textarea = textareaRef.current;
       if (textarea) {
-        const handleInput = () => {
-          const newContent = textarea.value;
+        const handleInput = (e: Event) => {
+          // Skip if this is a remote change
+          if (isRemoteChange.current) return;
+          
+          const target = e.target as HTMLTextAreaElement;
+          const newContent = target.value;
           if (newContent !== ytext.toString()) {
+            isRemoteChange.current = true;
             service.getYDoc().transact(() => {
               ytext.delete(0, ytext.length);
               ytext.insert(0, newContent);
+            });
+            // Don't call onChange here - the textarea is controlled by content prop
+            // which will be updated by the Yjs observer
+            requestAnimationFrame(() => {
+              isRemoteChange.current = false;
             });
           }
         };
@@ -77,7 +94,7 @@ export default function MarkdownEditor({ content, onChange, fileName, readOnly =
 
         return () => {
           ytext.unobserve(observer);
-          textarea.removeEventListener('input', handleInput);
+          textarea.removeEventListener('input', handleInput as EventListener);
           textarea.removeEventListener('select', handleSelectionChange);
           textarea.removeEventListener('click', handleSelectionChange);
           textarea.removeEventListener('keyup', handleSelectionChange);
