@@ -102,6 +102,7 @@ interface SpreadsheetEditorProps {
   onChange: (content: SpreadsheetCell[][]) => void;
   fileName: string;
   readOnly?: boolean;
+  collaborationUrl?: string;
 }
 
 // FIX #1: Proper multi-letter column name handling

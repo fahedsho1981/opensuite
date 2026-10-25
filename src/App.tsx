@@ -1,4 +1,4 @@
-import { useState, useCallback, Component, ErrorInfo, ReactNode } from 'react';
+import { useState, useCallback, useEffect, Component, ErrorInfo, ReactNode } from 'react';
 import Sidebar from './components/Sidebar';
 import DocumentEditor from './components/DocumentEditor';
 import SpreadsheetEditor from './components/SpreadsheetEditor';
@@ -216,6 +216,17 @@ OpenSuite can be embedded in other applications:
   const [editorMode, setEditorMode] = useState<'edit' | 'view'>('edit');
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showIntegration, setShowIntegration] = useState(false);
+  const [collaborationUrl, setCollaborationUrl] = useState<string | null>(null);
+  const [collaborationStatus, setCollaborationStatus] = useState<string>('disconnected');
+
+  // Read collaboration URL from query params
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const wsUrl = params.get('wsUrl');
+    if (wsUrl) {
+      setCollaborationUrl(wsUrl);
+    }
+  }, []);
 
   const handleNewFile = (type: FileType, name: string) => {
     const newFile = createNewFile(type, name);
@@ -341,6 +352,7 @@ OpenSuite can be embedded in other applications:
             onChange={handleFileContentChange}
             fileName={activeFile.name}
             readOnly={isReadOnly}
+            collaborationUrl={collaborationUrl || undefined}
           />
         );
       case 'xlsx':
@@ -351,6 +363,7 @@ OpenSuite can be embedded in other applications:
             onChange={handleFileContentChange}
             fileName={activeFile.name}
             readOnly={isReadOnly}
+            collaborationUrl={collaborationUrl || undefined}
           />
         );
       case 'pptx':
@@ -361,6 +374,7 @@ OpenSuite can be embedded in other applications:
             onChange={handleFileContentChange}
             fileName={activeFile.name}
             readOnly={isReadOnly}
+            collaborationUrl={collaborationUrl || undefined}
           />
         );
       case 'md':
@@ -370,6 +384,7 @@ OpenSuite can be embedded in other applications:
             onChange={handleFileContentChange}
             fileName={activeFile.name}
             readOnly={isReadOnly}
+            collaborationUrl={collaborationUrl || undefined}
           />
         );
       case 'pdf':
