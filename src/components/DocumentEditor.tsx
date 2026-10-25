@@ -21,7 +21,6 @@ import {
 } from 'lucide-react';
 import {
   checkGrammar,
-  autoCorrect,
   calculateReadability,
   t,
   TRANSLATIONS,
@@ -36,6 +35,40 @@ import {
   transformText,
   generateDropCap,
 } from '../utils/documentUtils';
+import {
+  BUILTIN_ADDINS,
+  DOCUMENT_TEMPLATES,
+  FONT_PT_SIZES,
+  WORD_ART_STYLES,
+  applyFontSize,
+  autoCorrectTextNodes,
+  blocksForLineSpacing,
+  clearFindHighlights,
+  correctWordBeforeCaret,
+  defaultMeta,
+  defaultPageSetup,
+  diffLines,
+  escapeHtml,
+  findTextMatches,
+  hashPassword,
+  joinDocument,
+  lookupSynonyms,
+  pageDimensions,
+  paintFindHighlights,
+  parseMacro,
+  readCleanHtml,
+  replaceAllText,
+  replaceMatch,
+  replacePlainTextRange,
+  replaceWordInTextNodes,
+  selectMatch,
+  snapFontPt,
+  splitDocument,
+  type BibEntry,
+  type DocumentMeta,
+  type TextMatch,
+} from '../utils/documentModel';
+import { BASE_DICTIONARY, addUserDictionaryWord, collectMisspellings, loadUserDictionary } from '../utils/spellDictionary';
 import {
   sanitizeHTML,
   sanitizeURL,
@@ -238,20 +271,6 @@ const SPECIAL_CHARS = [
   '—', '–', '…', '•', '†', '‡', '§', '¶',
 ];
 
-// Feature 55: Thesaurus data
-const THESAURUS: Record<string, string[]> = {
-  'good': ['excellent', 'great', 'fine', 'superb', 'wonderful', 'outstanding'],
-  'bad': ['poor', 'terrible', 'awful', 'horrible', 'dreadful', 'inferior'],
-  'big': ['large', 'huge', 'enormous', 'massive', 'gigantic', 'substantial'],
-  'small': ['tiny', 'little', 'miniature', 'compact', 'petite', 'minuscule'],
-  'happy': ['joyful', 'cheerful', 'delighted', 'pleased', 'content', 'ecstatic'],
-  'sad': ['unhappy', 'sorrowful', 'melancholy', 'depressed', 'gloomy', 'miserable'],
-  'fast': ['quick', 'rapid', 'swift', 'speedy', 'hasty', 'brisk'],
-  'slow': ['sluggish', 'leisurely', 'unhurried', 'gradual', 'plodding', 'languid'],
-  'beautiful': ['gorgeous', 'stunning', 'lovely', 'attractive', 'pretty', 'elegant'],
-  'ugly': ['hideous', 'unsightly', 'unattractive', 'homely', 'grotesque', 'repulsive'],
-};
-
 type ModalType = 'none' | 'findReplace' | 'insertImage' | 'specialChars' | 'lineSpacing' | 'insertTable' | 'insertLink' | 'headersFooters' | 'tableOfContents' | 'trackChanges' | 'comments' | 'spellCheck' | 'grammarCheck' | 'thesaurus' | 'wordCountGoals' | 'autoSave' | 'versionHistory' | 'collaboration' | 'templates' | 'mailMerge' | 'macros' | 'addIns' | 'cloudStorage' | 'documentProtection' | 'footnotes' | 'columns' | 'textBoxes' | 'shapes' | 'charts' | 'wordArt' | 'watermarks' | 'pageSetup' | 'spellingErrors' | 'grammarErrors' | 'readabilityStats' | 'textTransform' | 'insertChart' | 'mailMergePreview' | 'documentProperties' | 'printPreview' | 'themes' | 'language' | 'autoCorrect' | 'dropCap' | 'lineNumbers' | 'sectionBreak' | 'pageNumbers' | 'index' | 'bibliography' | 'crossReference' | 'caption' | 'compareDocuments';
 type ActiveDropdown = 'none' | 'font' | 'textColor' | 'highlightColor';
 
@@ -261,6 +280,7 @@ interface Comment {
   author: string;
   timestamp: Date;
   position: number;
+  quote?: string;
 }
 
 interface TrackChange {
@@ -288,6 +308,22 @@ interface Macro {
 export default function DocumentEditor({ content, onChange, fileName, readOnly = false, collaborationUrl }: DocumentEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const savedSelectionRef = useRef<Range | null>(null);
+  const lastEmittedRef = useRef<string | null>(null);
+  const hydratingRef = useRef(false);
+  const skipMetaEmitRef = useRef(true);
+  const readyRef = useRef(false);
+  const loadedMetaJson = useRef(JSON.stringify(defaultMeta()));
+  const metaRef = useRef<DocumentMeta>(defaultMeta());
+  const clientId = useRef(Math.random().toString(36).slice(2));
+  const collabChannelRef = useRef<BroadcastChannel | null>(null);
+  const findMatchesRef = useRef<TextMatch[]>([]);
+  const tableDragRef = useRef<{ start: HTMLTableCellElement; x: number; y: number; moved: boolean } | null>(null);
+  const columnResizeRef = useRef<{ cell: HTMLTableCellElement; startX: number; startWidth: number } | null>(null);
+  const objectDragRef = useRef<{ el: HTMLElement; startX: number; startY: number; originLeft: number; originTop: number } | null>(null);
+  const handlersRef = useRef<{ save: () => void; print: () => void; bold: () => void; italic: () => void; underline: () => void; find: () => void }>({
+    save: () => {}, print: () => {}, bold: () => {}, italic: () => {}, underline: () => {}, find: () => {},
+  });
+  const autoCorrectingRef = useRef(false);
   const [zoom, setZoom] = useState(100);
   const [showRuler, setShowRuler] = useState(true);
   const [modal, setModal] = useState<ModalType>('none');
@@ -456,7 +492,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   const [lineSpacingValue, setLineSpacingValue] = useState(1.5);
   const [activeDropdown, setActiveDropdown] = useState<ActiveDropdown>('none');
   const [currentFont, setCurrentFont] = useState('Arial');
-  const [currentFontSize, setCurrentFontSize] = useState('3');
+  const [currentFontSize, setCurrentFontSize] = useState('12');
   const [isBold, setIsBold] = useState(false);
   const [isItalic, setIsItalic] = useState(false);
   const [isUnderline, setIsUnderline] = useState(false);
@@ -529,17 +565,12 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     setToasts(prev => prev.filter(t => t.id !== id));
   }, []);
 
-  // Basic dictionary for spell check (common English words)
-  const DICTIONARY = useMemo(() => new Set([
-    'the', 'be', 'to', 'of', 'and', 'a', 'in', 'that', 'have', 'i', 'it', 'for', 'not', 'on', 
-    'with', 'he', 'as', 'you', 'do', 'at', 'this', 'but', 'his', 'by', 'from', 'they', 'we', 
-    'say', 'her', 'she', 'or', 'an', 'will', 'my', 'one', 'all', 'would', 'there', 'their', 
-    'what', 'so', 'up', 'out', 'if', 'about', 'who', 'get', 'which', 'go', 'me', 'when', 'make',
-    'can', 'like', 'time', 'no', 'just', 'him', 'know', 'take', 'people', 'into', 'year', 'your',
-    'good', 'bad', 'big', 'small', 'happy', 'sad', 'fast', 'slow', 'beautiful', 'ugly',
-    'document', 'editor', 'text', 'word', 'paragraph', 'sentence', 'letter', 'page',
-    'hello', 'world', 'test', 'example', 'sample', 'demo', 'word', 'processor'
-  ]), []);
+  const [userWords, setUserWords] = useState<string[]>(() => loadUserDictionary());
+  const dictionary = useMemo(() => {
+    const words = new Set(BASE_DICTIONARY);
+    userWords.forEach(word => words.add(word));
+    return words;
+  }, [userWords]);
 
   // NEW: Language/i18n
   const [currentLanguage, setCurrentLanguage] = useState<Language>('en');
@@ -595,26 +626,11 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   // Feature 53: Check spelling
   const checkSpelling = useCallback(() => {
     if (!editorRef.current) return;
-    
-    const text = editorRef.current.textContent || '';
-    const words = text.split(/\s+/);
-    const misspelled: string[] = [];
-    
-    words.forEach(word => {
-      const cleanWord = word.toLowerCase().replace(/[^\w]/g, '');
-      if (cleanWord && cleanWord.length > 2 && !DICTIONARY.has(cleanWord)) {
-        misspelled.push(word);
-      }
-    });
-    
-    setMisspelledWords([...new Set(misspelled)]); // Remove duplicates
-    
-    if (misspelled.length > 0) {
-      openModal('spellingErrors');
-    } else {
-      addToast('No spelling errors found', 'success');
-    }
-  }, [DICTIONARY, addToast]);
+    const misspelled = collectMisspellings(editorRef.current, dictionary);
+    setMisspelledWords(misspelled);
+    if (misspelled.length > 0) openModal('spellingErrors');
+    else addToast('No spelling errors found', 'success');
+  }, [dictionary, addToast]);
 
   // NEW: Grammar check
   const runGrammarCheck = useCallback(() => {
@@ -632,24 +648,14 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   // NEW: Auto-correct
   const runAutoCorrect = useCallback(() => {
     if (!editorRef.current) return;
-    const text = editorRef.current.innerHTML;
-    const plainText = editorRef.current.textContent || '';
-    const { corrected, changes } = autoCorrect(plainText);
-    
-    if (changes.length > 0) {
-      // Apply corrections to HTML
-      let html = text;
-      changes.forEach(change => {
-        const regex = new RegExp(`\\b${change.from}\\b`, 'gi');
-        html = html.replace(regex, change.to);
-      });
-      editorRef.current.innerHTML = html;
-      onChange(html);
-      addToast(`Auto-corrected ${changes.length} word(s)`, 'success');
+    const count = autoCorrectTextNodes(editorRef.current);
+    if (count > 0) {
+      emitDocument();
+      addToast(`Auto-corrected ${count} word(s)`, 'success');
     } else {
       addToast('No corrections needed', 'info');
     }
-  }, [onChange, addToast]);
+  }, [addToast]);
 
   // NEW: Readability stats
   const showReadabilityStats = useCallback(() => {
@@ -697,14 +703,15 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   // NEW: Text transform
   const applyTextTransform = useCallback((transform: 'uppercase' | 'lowercase' | 'capitalize' | 'titlecase' | 'sentencecase' | 'togglecase' | 'inverse') => {
+    restoreSelection();
     const selection = window.getSelection();
-    if (!selection || selection.toString().length === 0) {
+    const selectedText = selection?.toString() || '';
+    if (!selectedText) {
       addToast('Please select text first', 'warning');
       return;
     }
-    const selectedText = selection.toString();
-    const transformed = transformText(selectedText, transform);
-    document.execCommand('insertText', false, transformed);
+    document.execCommand('insertText', false, transformText(selectedText, transform));
+    emitDocument();
     addToast(`Text transformed to ${transform}`, 'success');
     closeModal();
   }, [addToast]);
@@ -712,14 +719,15 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   // NEW: Insert drop cap
   const insertDropCap = useCallback(() => {
     if (!editorRef.current) return;
+    restoreSelection();
     const selection = window.getSelection();
-    if (!selection || selection.toString().length === 0) {
+    const selectedText = selection?.toString() || '';
+    if (!selectedText) {
       addToast('Please select a paragraph first', 'warning');
       return;
     }
-    const selectedText = selection.toString();
-    const dropCapHtml = generateDropCap(selectedText);
-    document.execCommand('insertHTML', false, `<p style="line-height: 1.6;">${dropCapHtml}</p>`);
+    document.execCommand('insertHTML', false, `<p style="line-height: 1.6;">${generateDropCap(selectedText)}</p>`);
+    emitDocument();
     addToast('Drop cap applied', 'success');
     closeModal();
   }, [addToast]);
@@ -768,74 +776,205 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   const [isLoading, setIsLoading] = useState(false);
 
   // NEW: Page setup
-  const [pageSetup, setPageSetup] = useState({
-    margins: { top: 96, right: 96, bottom: 96, left: 96 },
-    orientation: 'portrait' as 'portrait' | 'landscape',
-    paperSize: 'letter' as 'letter' | 'a4' | 'legal',
-  });
+  const [pageSetup, setPageSetup] = useState(defaultPageSetup());
 
-  // NEW: Zoom presets
   const [zoomInput, setZoomInput] = useState('100');
+  const [protectionHash, setProtectionHash] = useState('');
+  const [bibliography, setBibliography] = useState<BibEntry[]>([]);
+  const [bibDraft, setBibDraft] = useState({ author: '', title: '', year: '', source: '' });
+  const [openMenu, setOpenMenu] = useState<'none' | 'file' | 'view' | 'insert' | 'tools'>('none');
+  const [currentBlock, setCurrentBlock] = useState('p');
+  const [pendingDraft, setPendingDraft] = useState<string | null>(null);
+  const [thesaurusWord, setThesaurusWord] = useState('');
+  const [wordArtText, setWordArtText] = useState('OpenSuite');
+  const [wordArtStyle, setWordArtStyle] = useState<(typeof WORD_ART_STYLES)[number]['id']>('blue');
+  const [captionText, setCaptionText] = useState('');
+  const [compareText, setCompareText] = useState('');
+  const [compareDiff, setCompareDiff] = useState<Array<{ type: 'same' | 'add' | 'del'; text: string }>>([]);
+  const [inviteName, setInviteName] = useState('');
+  const [pageCount, setPageCount] = useState(1);
+  const [reviewTick, setReviewTick] = useState(0);
 
   // Feature 56: Reading time
   const readingTime = useMemo(() => {
     const wordsPerMinute = 200;
-    const text = content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    const { html } = splitDocument(content);
+    const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     const words = text ? text.split(/\s+/).length : 0;
     return Math.ceil(words / wordsPerMinute);
   }, [content]);
 
   const stats = useMemo(() => {
-    if (!content) return { words: 0, chars: 0, paragraphs: 0 };
-    const text = content.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    const { html } = splitDocument(content);
+    if (!html) return { words: 0, chars: 0, paragraphs: 0 };
+    const text = html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
     const words = text ? text.split(/\s+/).length : 0;
     const chars = text.length;
-    const blockMatch = content.match(/<(p|h[1-6]|li|blockquote|div)[\s>]/gi);
-    const paragraphs = blockMatch ? blockMatch.length : 1;
+    const blockMatch = html.match(/<(p|h[1-6]|li|blockquote|div)[\s>]/gi);
+    const paragraphs = blockMatch ? blockMatch.length : (text ? 1 : 0);
     return { words, chars, paragraphs };
   }, [content]);
 
-  useEffect(() => {
-    if (editorRef.current && editorRef.current.innerHTML !== content) {
-      editorRef.current.innerHTML = content;
-    }
-  }, [content]);
+  const collectMeta = useCallback((): DocumentMeta => ({
+    headerText,
+    footerText,
+    showHeaders,
+    watermarkText,
+    showWatermark,
+    columnCount,
+    themeName: currentTheme.name,
+    pageSetup,
+    comments: comments.map(comment => ({
+      id: comment.id,
+      text: comment.text,
+      author: comment.author,
+      timestamp: comment.timestamp.toISOString(),
+      quote: comment.quote || '',
+    })),
+    documentProtected,
+    protectionHash,
+    properties: docProperties,
+    language: currentLanguage,
+    showLineNumbers,
+    showPageNumbers,
+    pageNumberStyle,
+    bibliography,
+    trackChangesEnabled,
+  }), [
+    headerText, footerText, showHeaders, watermarkText, showWatermark, columnCount, currentTheme,
+    pageSetup, comments, documentProtected, protectionHash, docProperties, currentLanguage,
+    showLineNumbers, showPageNumbers, pageNumberStyle, bibliography, trackChangesEnabled,
+  ]);
 
-  // Feature 58: Auto-save
+  metaRef.current = collectMeta();
+
+  const applyMeta = useCallback((meta: DocumentMeta) => {
+    setHeaderText(meta.headerText);
+    setFooterText(meta.footerText);
+    setShowHeaders(meta.showHeaders);
+    setWatermarkText(meta.watermarkText);
+    setShowWatermark(meta.showWatermark);
+    setColumnCount(meta.columnCount);
+    const theme = DOCUMENT_THEMES.find(item => item.name === meta.themeName) || DOCUMENT_THEMES[0];
+    setCurrentTheme(theme);
+    setPageSetup(meta.pageSetup);
+    setComments(meta.comments.map(comment => ({
+      id: comment.id,
+      text: comment.text,
+      author: comment.author,
+      timestamp: new Date(comment.timestamp),
+      position: 0,
+      quote: comment.quote,
+    })));
+    setDocumentProtected(meta.documentProtected);
+    setProtectionHash(meta.protectionHash);
+    setProtectionPassword('');
+    setDocProperties(meta.properties);
+    setCurrentLanguage((meta.language as Language) || 'en');
+    setShowLineNumbers(meta.showLineNumbers);
+    setShowPageNumbers(meta.showPageNumbers);
+    setPageNumberStyle(meta.pageNumberStyle);
+    setBibliography(meta.bibliography);
+    setTrackChangesEnabled(meta.trackChangesEnabled);
+    loadedMetaJson.current = JSON.stringify(meta);
+  }, []);
+
+  const emitDocument = useCallback((html?: string) => {
+    if (hydratingRef.current || !editorRef.current) return;
+    const clean = html ?? readCleanHtml(editorRef.current);
+    const joined = joinDocument(clean, metaRef.current);
+    if (joined === lastEmittedRef.current) return;
+    lastEmittedRef.current = joined;
+    onChange(joined);
+    collabChannelRef.current?.postMessage({ type: 'content', content: joined, sender: clientId.current });
+  }, [onChange]);
+
+  const loadJoinedContent = useCallback((joined: string) => {
+    const { html, meta } = splitDocument(joined);
+    hydratingRef.current = true;
+    skipMetaEmitRef.current = true;
+    lastEmittedRef.current = joined;
+    if (editorRef.current && editorRef.current.innerHTML !== html) {
+      editorRef.current.innerHTML = html;
+    }
+    applyMeta(meta);
+    if (editorRef.current) {
+      editorRef.current.style.columnCount = meta.columnCount > 1 ? String(meta.columnCount) : '';
+      editorRef.current.style.columnGap = meta.columnCount > 1 ? '24px' : '';
+      const theme = DOCUMENT_THEMES.find(item => item.name === meta.themeName) || DOCUMENT_THEMES[0];
+      editorRef.current.style.fontFamily = theme.bodyFont;
+      editorRef.current.style.color = theme.textColor;
+      setPageCount(1 + editorRef.current.querySelectorAll('.os-page-break').length);
+    }
+    hydratingRef.current = false;
+    readyRef.current = true;
+  }, [applyMeta]);
+
+  useEffect(() => {
+    if (content === lastEmittedRef.current) return;
+    loadJoinedContent(content);
+  }, [content, loadJoinedContent]);
+
+  useEffect(() => {
+    if (!readyRef.current || hydratingRef.current) return;
+    if (skipMetaEmitRef.current) {
+      skipMetaEmitRef.current = false;
+      return;
+    }
+    const json = JSON.stringify(metaRef.current);
+    if (json === loadedMetaJson.current) return;
+    loadedMetaJson.current = json;
+    emitDocument();
+  }, [
+    emitDocument, headerText, footerText, showHeaders, watermarkText, showWatermark, columnCount,
+    currentTheme, pageSetup, comments, documentProtected, protectionHash, docProperties, currentLanguage,
+    showLineNumbers, showPageNumbers, pageNumberStyle, bibliography, trackChangesEnabled,
+  ]);
+
+  useEffect(() => {
+    const draft = localStorage.getItem(`doc_${fileName}`);
+    if (draft && draft !== content) setPendingDraft(draft);
+    else setPendingDraft(null);
+  }, [fileName]);
+
   useEffect(() => {
     if (!autoSaveEnabled) return;
     const interval = setInterval(() => {
-      localStorage.setItem(`doc_${fileName}`, content);
+      if (!editorRef.current) return;
+      const joined = joinDocument(readCleanHtml(editorRef.current), metaRef.current);
+      localStorage.setItem(`doc_${fileName}`, joined);
       setLastSaved(new Date());
-    }, 30000); // Save every 30 seconds
+    }, 30000);
     return () => clearInterval(interval);
-  }, [autoSaveEnabled, content, fileName]);
+  }, [autoSaveEnabled, fileName]);
 
-  // Feature 59: Save version
+  useEffect(() => {
+    if (!editorRef.current) return;
+    editorRef.current.style.columnCount = columnCount > 1 ? String(columnCount) : '';
+    editorRef.current.style.columnGap = columnCount > 1 ? '24px' : '';
+    editorRef.current.style.fontFamily = currentTheme.bodyFont;
+    editorRef.current.style.color = currentTheme.textColor;
+  }, [columnCount, currentTheme]);
+
   const saveVersion = (label?: string) => {
     const version: Version = {
       id: Date.now().toString(),
       timestamp: new Date(),
-      content,
-      author: 'User',
+      content: editorRef.current ? joinDocument(readCleanHtml(editorRef.current), metaRef.current) : content,
+      author: docProperties.author || 'User',
       label,
     };
-    setVersions(prev => [version, ...prev].slice(0, 50)); // Keep last 50 versions
+    setVersions(prev => [version, ...prev].slice(0, 50));
     addToast('Version saved', 'success');
   };
 
-  // Feature 59: Restore version
   const restoreVersion = (version: Version) => {
-    if (window.confirm(`Restore version from ${version.timestamp.toLocaleString()}? This will replace your current document.`)) {
-      if (editorRef.current) {
-        editorRef.current.innerHTML = version.content;
-        onChange(version.content);
-        addToast('Version restored', 'success');
-      }
-    }
+    if (!window.confirm(`Restore version from ${version.timestamp.toLocaleString()}? This will replace your current document.`)) return;
+    loadJoinedContent(version.content);
+    onChange(version.content);
+    addToast('Version restored', 'success');
   };
 
-  // Feature 59: Delete version
   const deleteVersion = (versionId: string) => {
     setVersions(prev => prev.filter(v => v.id !== versionId));
     addToast('Version deleted', 'info');
@@ -844,15 +983,20 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   useEffect(() => {
     const handleSelectionChange = () => {
       if (!editorRef.current) return;
-      setIsBold(document.queryCommandState('bold'));
-      setIsItalic(document.queryCommandState('italic'));
-      setIsUnderline(document.queryCommandState('underline'));
-      const fontSize = document.queryCommandValue('fontSize');
-      if (fontSize) setCurrentFontSize(fontSize);
+      const selection = window.getSelection();
+      const inside = !!selection && selection.rangeCount > 0 && editorRef.current.contains(selection.anchorNode);
+      setIsBold(inside && document.queryCommandState('bold'));
+      setIsItalic(inside && document.queryCommandState('italic'));
+      setIsUnderline(inside && document.queryCommandState('underline'));
+      if (!inside) return;
       const fontName = document.queryCommandValue('fontName');
       if (fontName) setCurrentFont(fontName.replace(/['"]/g, ''));
       const foreColor = document.queryCommandValue('foreColor');
       if (foreColor) setCurrentTextColor(foreColor);
+      const anchor = selection?.anchorNode instanceof HTMLElement ? selection.anchorNode : selection?.anchorNode?.parentElement;
+      if (anchor) setCurrentFontSize(String(snapFontPt(parseFloat(getComputedStyle(anchor).fontSize) || 16)));
+      const block = (document.queryCommandValue('formatBlock') || 'p').toString().replace(/[<>]/g, '').toLowerCase();
+      setCurrentBlock(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'pre', 'blockquote'].includes(block) ? block : 'p');
     };
     document.addEventListener('selectionchange', handleSelectionChange);
     return () => document.removeEventListener('selectionchange', handleSelectionChange);
@@ -868,44 +1012,126 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     }
   };
 
+  const placeSelection = (range: Range | null) => {
+    if (!range || !range.startContainer.isConnected) return;
+    const selection = window.getSelection();
+    if (!selection) return;
+    selection.removeAllRanges();
+    try { selection.addRange(range); } catch { savedSelectionRef.current = null; }
+  };
+
   const restoreSelection = () => {
-    if (savedSelectionRef.current) {
-      const selection = window.getSelection();
-      if (selection) {
-        selection.removeAllRanges();
-        selection.addRange(savedSelectionRef.current);
-      }
-    }
     editorRef.current?.focus();
+    placeSelection(savedSelectionRef.current);
+  };
+
+  const keepEditorSelection = (event: React.MouseEvent) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('select, input, textarea, option')) return;
+    event.preventDefault();
+  };
+
+  const insertHtmlAtSelection = (html: string) => {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0) {
+      document.execCommand('insertHTML', false, html);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
+    const holder = document.createElement('div');
+    holder.innerHTML = html;
+    const fragment = document.createDocumentFragment();
+    let last: ChildNode | null = null;
+    while (holder.firstChild) {
+      last = holder.firstChild;
+      fragment.appendChild(last);
+    }
+    range.insertNode(fragment);
+    if (last) {
+      const after = document.createRange();
+      after.setStartAfter(last);
+      after.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(after);
+    }
   };
 
   const execCommand = useCallback((command: string, value?: string) => {
+    const live = window.getSelection();
+    const range = live && live.rangeCount > 0 && editorRef.current?.contains(live.anchorNode)
+      ? live.getRangeAt(0).cloneRange()
+      : savedSelectionRef.current;
     editorRef.current?.focus();
-    
-    // Feature 51: Track changes
-    if (trackChangesEnabled && editorRef.current) {
-      const selection = window.getSelection();
-      if (selection && selection.toString()) {
-        const change: TrackChange = {
-          id: Date.now().toString(),
-          type: 'delete',
-          text: selection.toString(),
-          author: 'User',
-          timestamp: new Date(),
-        };
-        setTrackChanges(prev => [...prev, change]);
-      }
+    placeSelection(range);
+    document.execCommand('styleWithCSS', false, 'false');
+    if (trackChangesEnabled && value && (command === 'insertText' || command === 'insertHTML')) {
+      const stamp = Date.now().toString();
+      const payload = command === 'insertText'
+        ? `<ins class="os-ins" data-author="User" data-time="${stamp}">${escapeHtml(value)}</ins>`
+        : `<ins class="os-ins" data-author="User" data-time="${stamp}">${value}</ins>`;
+      insertHtmlAtSelection(payload);
+    } else {
+      document.execCommand(command, false, value);
     }
-    
-    document.execCommand(command, false, value);
-    if (editorRef.current) {
-      onChange(editorRef.current.innerHTML);
-    }
-  }, [onChange, trackChangesEnabled]);
+    emitDocument();
+    setReviewTick(tick => tick + 1);
+  }, [emitDocument, trackChangesEnabled]);
 
   const handleInput = () => {
-    if (editorRef.current) {
-      onChange(editorRef.current.innerHTML);
+    if (!editorRef.current || autoCorrectingRef.current) return;
+    if (autoCorrectEnabled) {
+      autoCorrectingRef.current = true;
+      correctWordBeforeCaret(editorRef.current);
+      autoCorrectingRef.current = false;
+    }
+    setPageCount(1 + editorRef.current.querySelectorAll('.os-page-break').length);
+    emitDocument();
+    setReviewTick(tick => tick + 1);
+  };
+
+  const handleBeforeInput = (event: React.FormEvent<HTMLDivElement>) => {
+    if (!trackChangesEnabled || readOnly || documentProtected) return;
+    const input = event.nativeEvent as InputEvent;
+    if (input.inputType === 'insertText' && input.data) {
+      event.preventDefault();
+      insertHtmlAtSelection(`<ins class="os-ins" data-author="User" data-time="${Date.now()}">${escapeHtml(input.data)}</ins>`);
+      emitDocument();
+      setReviewTick(tick => tick + 1);
+      return;
+    }
+    if (input.inputType === 'deleteContentBackward' || input.inputType === 'deleteContentForward' || input.inputType === 'deleteByCut') {
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0 || !editorRef.current) return;
+      event.preventDefault();
+      const range = selection.getRangeAt(0);
+      if (range.collapsed) {
+        const step = input.inputType === 'deleteContentForward' ? 'forward' : 'backward';
+        selection.modify('extend', step, 'character');
+      }
+      const next = selection.getRangeAt(0);
+      if (next.collapsed) return;
+      const host = next.commonAncestorContainer instanceof HTMLElement
+        ? next.commonAncestorContainer
+        : next.commonAncestorContainer.parentElement;
+      const ownInsert = host?.closest('ins.os-ins');
+      if (ownInsert && ownInsert.contains(next.startContainer) && ownInsert.contains(next.endContainer)) {
+        next.deleteContents();
+        if (!ownInsert.textContent) ownInsert.remove();
+      } else {
+        const del = document.createElement('del');
+        del.className = 'os-del';
+        del.dataset.author = 'User';
+        del.dataset.time = Date.now().toString();
+        try {
+          next.surroundContents(del);
+        } catch {
+          del.appendChild(next.extractContents());
+          next.insertNode(del);
+        }
+      }
+      emitDocument();
+      setReviewTick(tick => tick + 1);
     }
   };
 
@@ -923,9 +1149,25 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   }, [contextMenu]);
 
   const handleExport = async () => {
-    if (editorRef.current) {
-      await exportDocx(editorRef.current.innerHTML, fileName);
-    }
+    if (!editorRef.current) return;
+    await exportDocx(joinDocument(readCleanHtml(editorRef.current), metaRef.current), fileName);
+    addToast('DOCX exported', 'success');
+  };
+
+  const handleExportHtml = () => {
+    if (!editorRef.current) return;
+    const currentContent = readCleanHtml(editorRef.current);
+    const title = docProperties.title || fileName;
+    const blob = new Blob(
+      [`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${escapeHtml(title)}</title><meta name="author" content="${escapeHtml(docProperties.author)}"><style>body{font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:40px;line-height:1.8;}</style></head><body>${currentContent}</body></html>`],
+      { type: 'text/html' }
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName.replace(/\.\w+$/, '.html');
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const handlePrint = () => {
@@ -935,44 +1177,40 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   const handleSave = () => {
     try {
       if (!editorRef.current) return;
-      const currentContent = editorRef.current.innerHTML;
-      
-      // Security scan before save
+      const currentContent = readCleanHtml(editorRef.current);
       const securityIssues = scanDocumentSecurity(currentContent);
       if (securityIssues.length > 0) {
         const score = getSecurityScore(securityIssues);
         if (score < 70) {
           logger.warn('Security issues detected in document', { score, issues: securityIssues.length });
-          if (!confirm(`Warning: ${securityIssues.length} security issue(s) detected. Save anyway?`)) {
-            return;
-          }
+          if (!confirm(`Warning: ${securityIssues.length} security issue(s) detected. Save anyway?`)) return;
         }
       }
-      
-      const blob = new Blob(
-        [`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${fileName}</title><style>body{font-family:Arial,sans-serif;max-width:800px;margin:0 auto;padding:40px;line-height:1.8;}</style></head><body>${currentContent}</body></html>`],
-        { type: 'text/html' }
-      );
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName.replace(/\.\w+$/, '.html');
-      a.click();
-      URL.revokeObjectURL(url);
+      const joined = joinDocument(currentContent, { ...metaRef.current, properties: { ...metaRef.current.properties, modified: new Date().toISOString() } });
+      localStorage.setItem(`doc_${fileName}`, joined);
+      lastEmittedRef.current = joined;
+      onChange(joined);
+      setLastSaved(new Date());
+      setDocProperties(prev => ({ ...prev, modified: new Date().toISOString() }));
       saveVersion('Manual save');
-      
-      // Create backup
-      backupManager.createBackup('snapshot').catch(err => {
-        logger.error('Backup failed', { error: err });
-      });
-      
+      backupManager.createBackup('snapshot').catch(err => logger.error('Backup failed', { error: err }));
       logger.info('Document saved', { fileName });
-      announceToScreenReader('Document saved successfully', 'polite');
+      announceToScreenReader('Document saved', 'polite');
+      addToast('Document saved on this computer', 'success');
     } catch (error) {
       errorTracker.captureError(error instanceof Error ? error : new Error(String(error)), { action: 'save', fileName });
       logger.error('Save failed', { error });
       alertManager.triggerAlert('Save Failed', 'Failed to save document. Please try again.', 'error');
     }
+  };
+
+  handlersRef.current = {
+    save: handleSave,
+    print: handlePrint,
+    bold: () => execCommand('bold'),
+    italic: () => execCommand('italic'),
+    underline: () => execCommand('underline'),
+    find: () => openModal('findReplace'),
   };
 
   const openModal = (type: ModalType) => {
@@ -1121,7 +1359,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     }
     
     if (editorRef.current) {
-      onChange(editorRef.current.innerHTML);
+      emitDocument();
     }
     addToast(`Row added ${position}`, 'success');
   };
@@ -1149,7 +1387,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     });
     
     if (editorRef.current) {
-      onChange(editorRef.current.innerHTML);
+      emitDocument();
     }
     addToast(`Column added ${position}`, 'success');
   };
@@ -1173,7 +1411,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     row.remove();
     
     if (editorRef.current) {
-      onChange(editorRef.current.innerHTML);
+      emitDocument();
     }
     addToast('Row deleted', 'success');
   };
@@ -1201,7 +1439,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     });
     
     if (editorRef.current) {
-      onChange(editorRef.current.innerHTML);
+      emitDocument();
     }
     addToast('Column deleted', 'success');
   };
@@ -1213,7 +1451,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     if (window.confirm('Delete entire table?')) {
       table.remove();
       if (editorRef.current) {
-        onChange(editorRef.current.innerHTML);
+        emitDocument();
       }
       addToast('Table deleted', 'success');
     }
@@ -1229,7 +1467,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     });
     
     if (editorRef.current) {
-      onChange(editorRef.current.innerHTML);
+      emitDocument();
     }
     addToast(`Background color applied to ${cells.length} cell${cells.length > 1 ? 's' : ''}`, 'success');
   };
@@ -1244,7 +1482,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     });
     
     if (editorRef.current) {
-      onChange(editorRef.current.innerHTML);
+      emitDocument();
     }
     addToast(`Background color cleared from ${cells.length} cell${cells.length > 1 ? 's' : ''}`, 'success');
   };
@@ -1318,43 +1556,68 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   // Handle drag selection for table cells
   const handleTableCellMouseDown = (e: React.MouseEvent, cell: HTMLTableCellElement) => {
-    if (e.button === 0 && !e.ctrlKey && !e.metaKey) {
-      // Prevent default text selection
+    if (e.button !== 0 || e.ctrlKey || e.metaKey) return;
+    const rect = cell.getBoundingClientRect();
+    if (e.clientX > rect.right - 6) {
       e.preventDefault();
-      
-      // Start drag selection
-      setIsSelectingCells(true);
-      const newSelection = new Set<HTMLTableCellElement>();
-      newSelection.add(cell);
-      setSelectedTableCells(newSelection);
-      setShowTableToolbar(true);
-      
-      // Store the starting cell for rectangular selection
-      (window as any).__tableDragStart = cell;
+      columnResizeRef.current = { cell, startX: e.clientX, startWidth: cell.offsetWidth };
+      return;
     }
+    tableDragRef.current = { start: cell, x: e.clientX, y: e.clientY, moved: false };
   };
 
   const handleTableCellMouseEnter = (e: React.MouseEvent, cell: HTMLTableCellElement) => {
-    if (isSelectingCells && e.buttons === 1) {
-      // Prevent default during drag
-      e.preventDefault();
-      
-      // Get the starting cell
-      const startCell = (window as any).__tableDragStart as HTMLTableCellElement | undefined;
-      if (!startCell) return;
-      
-      // Calculate rectangular selection
-      const newSelection = calculateRectangularSelection(startCell, cell);
-      setSelectedTableCells(newSelection);
-    }
+    const drag = tableDragRef.current;
+    if (!drag || e.buttons !== 1) return;
+    if (!drag.moved && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 5) return;
+    drag.moved = true;
+    setIsSelectingCells(true);
+    setSelectedTableCells(calculateRectangularSelection(drag.start, cell));
+    setShowTableToolbar(true);
   };
 
   const handleTableCellMouseUp = () => {
-    if (isSelectingCells) {
-      setIsSelectingCells(false);
-      // Clean up drag start reference
-      delete (window as any).__tableDragStart;
+    if (columnResizeRef.current) {
+      columnResizeRef.current = null;
+      emitDocument();
     }
+    const drag = tableDragRef.current;
+    tableDragRef.current = null;
+    if (drag && !drag.moved) {
+      setSelectedTableCells(new Set());
+      setIsSelectingCells(false);
+    } else if (isSelectingCells) {
+      setIsSelectingCells(false);
+    }
+  };
+
+  const mergeSelectedCells = () => {
+    const cells = getSelectedTableCells();
+    if (cells.length < 2) {
+      addToast('Select at least two cells to merge', 'warning');
+      return;
+    }
+    const table = cells[0].closest('table');
+    if (!table || cells.some(cell => cell.closest('table') !== table)) return;
+    const rows = Array.from(table.rows);
+    const points = cells.map(cell => {
+      const row = cell.parentElement as HTMLTableRowElement;
+      return { cell, row: rows.indexOf(row), col: Array.from(row.cells).indexOf(cell) };
+    });
+    const minRow = Math.min(...points.map(point => point.row));
+    const maxRow = Math.max(...points.map(point => point.row));
+    const minCol = Math.min(...points.map(point => point.col));
+    const maxCol = Math.max(...points.map(point => point.col));
+    const anchor = rows[minRow]?.cells[minCol];
+    if (!anchor) return;
+    anchor.colSpan = maxCol - minCol + 1;
+    anchor.rowSpan = maxRow - minRow + 1;
+    points.forEach(point => {
+      if (point.cell !== anchor) point.cell.remove();
+    });
+    setSelectedTableCells(new Set([anchor]));
+    emitDocument();
+    addToast('Cells merged', 'success');
   };
 
   // Calculate rectangular selection between two cells
@@ -1402,36 +1665,29 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   // Update visual selection state for table cells
   useEffect(() => {
     if (!editorRef.current) return;
-    
-    // Remove selection highlight from all cells
-    const allCells = editorRef.current.querySelectorAll('td, th');
-    allCells.forEach(cell => {
-      (cell as HTMLElement).style.outline = '';
-      (cell as HTMLElement).style.outlineOffset = '';
-    });
-    
-    // Add selection highlight to selected cells
+    editorRef.current.querySelectorAll('.os-cell-selected').forEach(cell => cell.classList.remove('os-cell-selected'));
     selectedTableCells.forEach(cell => {
-      cell.style.outline = '2px solid #3b82f6';
-      cell.style.outlineOffset = '-2px';
+      if (cell.isConnected) cell.classList.add('os-cell-selected');
     });
   }, [selectedTableCells]);
 
-  // Global mouseup listener to end drag selection
   useEffect(() => {
     const handleGlobalMouseUp = () => {
-      if (isSelectingCells) {
-        setIsSelectingCells(false);
-        delete (window as any).__tableDragStart;
+      if (columnResizeRef.current || objectDragRef.current) {
+        columnResizeRef.current = null;
+        objectDragRef.current = null;
+        emitDocument();
       }
+      tableDragRef.current = null;
+      if (isSelectingCells) setIsSelectingCells(false);
     };
-
     window.addEventListener('mouseup', handleGlobalMouseUp);
     return () => window.removeEventListener('mouseup', handleGlobalMouseUp);
-  }, [isSelectingCells]);
+  }, [isSelectingCells, emitDocument]);
 
   const insertPageBreak = () => {
-    execCommand('insertHTML', '<div style="page-break-after: always; border-top: 2px dashed #9ca3af; margin: 2em 0; padding-top: 4px;"><span style="font-size: 10px; color: #9ca3af;">— Page Break —</span></div><p><br></p>');
+    execCommand('insertHTML', '<div class="os-page-break" contenteditable="false">Page break</div><p><br></p>');
+    setPageCount(count => count + 1);
   };
 
   const insertSpecialChar = (char: string) => {
@@ -1439,56 +1695,64 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     execCommand('insertText', char);
   };
 
-  // Feature 45: Insert text box
   const insertTextBox = () => {
     restoreSelection();
-    execCommand('insertHTML', '<div style="border: 2px solid #3b82f6; padding: 16px; margin: 1em 0; min-height: 100px; background-color: #f0f9ff;">Text Box - Click to edit</div><p><br></p>');
+    execCommand('insertHTML', '<div class="os-object os-textbox" style="border: 2px solid #3b82f6; padding: 16px 16px 16px 28px; min-width: 180px; min-height: 90px; background: #f0f9ff;"><span class="os-handle" contenteditable="false" title="Drag">⠿</span>Text box</div><p><br></p>');
     closeModal();
   };
 
-  // Feature 46: Insert shape
   const insertShape = (shape: string) => {
     restoreSelection();
-    let shapeHTML = '';
-    switch (shape) {
-      case 'rectangle':
-        shapeHTML = '<div style="width: 200px; height: 100px; background-color: #3b82f6; margin: 1em 0;"></div>';
-        break;
-      case 'circle':
-        shapeHTML = '<div style="width: 100px; height: 100px; background-color: #3b82f6; border-radius: 50%; margin: 1em 0;"></div>';
-        break;
-      case 'triangle':
-        shapeHTML = '<div style="width: 0; height: 0; border-left: 50px solid transparent; border-right: 50px solid transparent; border-bottom: 100px solid #3b82f6; margin: 1em 0;"></div>';
-        break;
-    }
-    execCommand('insertHTML', shapeHTML + '<p><br></p>');
+    const body = shape === 'circle'
+      ? 'border-radius:50%; width:120px; height:120px;'
+      : shape === 'triangle'
+        ? 'width:0; height:0; border-left:60px solid transparent; border-right:60px solid transparent; border-bottom:110px solid #3b82f6; background:transparent; resize:none;'
+        : 'width:200px; height:110px; background:#3b82f6;';
+    execCommand('insertHTML', `<div class="os-object" style="${body} margin:1em 0;"><span class="os-handle" contenteditable="false" title="Drag">⠿</span></div><p><br></p>`);
     closeModal();
   };
 
-  // Feature 42: Insert table of contents
+  const insertSectionBreak = () => {
+    restoreSelection();
+    execCommand('insertHTML', '<div class="os-section-break" contenteditable="false">Section break</div><p><br></p>');
+    closeModal();
+  };
+
   const insertTableOfContents = () => {
     restoreSelection();
     if (!editorRef.current) return;
-    
-    const headings = editorRef.current.querySelectorAll('h1, h2, h3');
-    let toc = '<div style="background-color: #f9fafb; padding: 20px; margin: 1em 0; border-left: 4px solid #3b82f6;"><h2 style="margin-top: 0;">Table of Contents</h2><ul style="list-style: none; padding-left: 0;">';
-    
+    const headings = Array.from(editorRef.current.querySelectorAll('h1, h2, h3'));
     headings.forEach((heading, index) => {
-      const level = parseInt(heading.tagName.substring(1));
-      const indent = (level - 1) * 20;
-      toc += `<li style="margin-left: ${indent}px; margin-bottom: 8px;"><a href="#heading-${index}" style="color: #3b82f6; text-decoration: none;">${heading.textContent}</a></li>`;
+      if (!heading.id) heading.id = `heading-${index + 1}`;
     });
-    
-    toc += '</ul></div><p><br></p>';
-    execCommand('insertHTML', toc);
+    const items = headings.map(heading => {
+      const level = parseInt(heading.tagName.substring(1), 10);
+      return `<li style="margin-left:${(level - 1) * 20}px; margin-bottom:8px;"><a href="#${heading.id}">${escapeHtml(heading.textContent || '')}</a></li>`;
+    }).join('');
+    execCommand('insertHTML', `<div class="os-toc" style="background:#f9fafb; padding:20px; margin:1em 0; border-left:4px solid #3b82f6;"><h2 style="margin-top:0;">Table of Contents</h2><ul style="list-style:none; padding-left:0;">${items || '<li>Add headings, then insert the table of contents again.</li>'}</ul></div><p><br></p>`);
     closeModal();
   };
 
-  // Feature 43: Insert footnote
   const insertFootnote = () => {
     restoreSelection();
-    const footnoteNum = (editorRef.current?.querySelectorAll('.footnote')?.length || 0) + 1;
-    execCommand('insertHTML', `<sup class="footnote" style="color: #3b82f6; cursor: pointer;">[${footnoteNum}]</sup>`);
+    if (!editorRef.current) return;
+    const note = window.prompt('Footnote text');
+    if (!note) return;
+    const number = editorRef.current.querySelectorAll('.os-footnote-ref').length + 1;
+    const id = `fn-${number}`;
+    execCommand('insertHTML', `<sup class="os-footnote-ref" id="fnref-${number}"><a href="#${id}">${number}</a></sup>`);
+    let section = editorRef.current.querySelector('.os-footnotes');
+    if (!section) {
+      section = document.createElement('section');
+      section.className = 'os-footnotes';
+      section.innerHTML = '<hr><h2>Notes</h2>';
+      editorRef.current.appendChild(section);
+    }
+    const item = document.createElement('p');
+    item.id = id;
+    item.innerHTML = `<a href="#fnref-${number}">${number}</a>. ${escapeHtml(note)}`;
+    section.appendChild(item);
+    emitDocument();
     closeModal();
   };
 
@@ -1519,17 +1783,34 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   // Feature 52: Add comment
   const addComment = () => {
     if (!newComment.trim()) return;
+    restoreSelection();
     const selection = window.getSelection();
-    const position = selection?.anchorOffset || 0;
-    const comment: Comment = {
-      id: Date.now().toString(),
-      text: newComment,
-      author: 'User',
+    const id = Date.now().toString();
+    const quote = selection?.toString() || '';
+    if (quote && selection && selection.rangeCount > 0) {
+      const span = document.createElement('span');
+      span.className = 'os-comment-anchor';
+      span.dataset.commentId = id;
+      span.title = newComment.trim();
+      const range = selection.getRangeAt(0);
+      try {
+        range.surroundContents(span);
+      } catch {
+        span.appendChild(range.extractContents());
+        range.insertNode(span);
+      }
+      emitDocument();
+    }
+    setComments(prev => [...prev, {
+      id,
+      text: newComment.trim(),
+      author: docProperties.author || 'User',
       timestamp: new Date(),
-      position,
-    };
-    setComments(prev => [...prev, comment]);
+      position: 0,
+      quote,
+    }]);
     setNewComment('');
+    setShowComments(true);
     closeModal();
     addToast('Comment added', 'success');
   };
@@ -1555,17 +1836,29 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     setEditingCommentText('');
   };
 
-  // Feature 52: Delete comment
+  // Feature 52: Delete comment and its anchor
   const deleteComment = (commentId: string) => {
+    editorRef.current?.querySelectorAll(`[data-comment-id="${commentId}"]`).forEach(anchor => {
+      const parent = anchor.parentNode;
+      while (anchor.firstChild) parent?.insertBefore(anchor.firstChild, anchor);
+      anchor.remove();
+    });
+    emitDocument();
     setComments(prev => prev.filter(c => c.id !== commentId));
     addToast('Comment deleted', 'info');
   };
 
-  // Feature 55: Look up word in thesaurus and replace
+  const focusComment = (commentId: string) => {
+    const anchor = editorRef.current?.querySelector(`[data-comment-id="${commentId}"]`);
+    anchor?.scrollIntoView({ block: 'center' });
+  };
+
   const replaceWithSynonym = (synonym: string) => {
+    restoreSelection();
     const selection = window.getSelection();
     if (selection && selection.toString()) {
       document.execCommand('insertText', false, synonym);
+      emitDocument();
       addToast(`Replaced with "${synonym}"`, 'success');
     } else {
       addToast('Please select a word first', 'warning');
@@ -1573,139 +1866,97 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
     closeModal();
   };
 
-  // Feature 63: Run macro
   const runMacro = (macro: Macro) => {
-    try {
-      // Simple macro execution (for demo purposes)
-      if (macro.code.includes('bold')) {
-        execCommand('bold');
-      } else if (macro.code.includes('italic')) {
-        execCommand('italic');
-      }
-    } catch (error) {
-      console.error('Macro execution failed:', error);
-    }
+    restoreSelection();
+    editorRef.current?.focus();
+    parseMacro(macro.code).forEach(step => {
+      if (step.op === 'bold') execCommand('bold');
+      else if (step.op === 'italic') execCommand('italic');
+      else if (step.op === 'underline') execCommand('underline');
+      else if (step.op === 'strike') execCommand('strikeThrough');
+      else if (step.op === 'subscript') execCommand('subscript');
+      else if (step.op === 'superscript') execCommand('superscript');
+      else if (step.op === 'clear') execCommand('removeFormat');
+      else if (step.op === 'bullet') execCommand('insertUnorderedList');
+      else if (step.op === 'number') execCommand('insertOrderedList');
+      else if (step.op === 'indent') execCommand('indent');
+      else if (step.op === 'outdent') execCommand('outdent');
+      else if (step.op === 'align') execCommand(step.arg === 'center' ? 'justifyCenter' : step.arg === 'right' ? 'justifyRight' : step.arg === 'justify' ? 'justifyFull' : 'justifyLeft');
+      else if (step.op === 'font') execCommand('fontName', step.arg);
+      else if (step.op === 'size' && editorRef.current) applyFontSize(editorRef.current, parseInt(step.arg, 10) || 12);
+      else if (step.op === 'color') execCommand('foreColor', step.arg);
+      else if (step.op === 'highlight') execCommand('hiliteColor', step.arg);
+      else if (step.op === 'heading') execCommand('formatBlock', step.arg || 'p');
+      else if (step.op === 'insert') execCommand('insertText', step.arg);
+      else addToast(`Unknown macro command "${step.op}"`, 'warning');
+    });
+    emitDocument();
+    addToast(`Ran “${macro.name}”`, 'success');
   };
 
-  const applyLineSpacing = () => {
+  const applyLineSpacing = (value: number = lineSpacingValue) => {
     if (!editorRef.current) return;
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0) {
-      const currentNode = selection?.anchorNode;
-      if (currentNode) {
-        let parentEl = currentNode.nodeType === Node.TEXT_NODE ? currentNode.parentElement : currentNode as Element;
-        while (parentEl && parentEl !== editorRef.current) {
-          if (['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'DIV'].includes(parentEl.tagName)) {
-            (parentEl as HTMLElement).style.lineHeight = String(lineSpacingValue);
-            break;
-          }
-          parentEl = parentEl.parentElement;
-        }
-      }
-    } else {
-      const range = selection.getRangeAt(0);
-      const walker = document.createTreeWalker(
-        editorRef.current,
-        NodeFilter.SHOW_ELEMENT,
-        {
-          acceptNode: (node) => {
-            const el = node as Element;
-            if (['P', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'LI', 'DIV'].includes(el.tagName)) {
-              if (range.intersectsNode(el)) {
-                return NodeFilter.FILTER_ACCEPT;
-              }
-            }
-            return NodeFilter.FILTER_SKIP;
-          }
-        }
-      );
-      let node = walker.nextNode();
-      while (node) {
-        (node as HTMLElement).style.lineHeight = String(lineSpacingValue);
-        node = walker.nextNode();
-      }
+    restoreSelection();
+    const blocks = blocksForLineSpacing(editorRef.current);
+    if (blocks.length === 0) {
+      addToast('Click in a paragraph first', 'warning');
+      return;
     }
-    onChange(editorRef.current.innerHTML);
+    blocks.forEach(block => { block.style.lineHeight = String(value); });
+    setLineSpacingValue(value);
+    emitDocument();
     closeModal();
+  };
+
+  const showFindMatch = (matches: TextMatch[], index: number) => {
+    findMatchesRef.current = matches;
+    setFindCount(matches.length);
+    setFindMatches(matches.map(match => match.start));
+    setCurrentFindIndex(matches.length ? index : 0);
+    if (matches[index]) {
+      selectMatch(matches[index]);
+      paintFindHighlights(matches, index);
+    } else {
+      clearFindHighlights();
+    }
   };
 
   const handleFind = () => {
     if (!findText || !editorRef.current) return;
-    const textContent = editorRef.current.textContent || '';
-    const flags = caseSensitive ? 'g' : 'gi';
-    const regex = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
-    const matches: number[] = [];
-    let match;
-    while ((match = regex.exec(textContent)) !== null) {
-      matches.push(match.index);
-    }
-    setFindMatches(matches);
-    setFindCount(matches.length);
-    setCurrentFindIndex(0);
-    if (window.find) {
-      try {
-        window.find(findText, caseSensitive, false, true, false, false, false);
-      } catch (e) {
-        window.find(findText, caseSensitive);
-      }
-    }
+    const matches = findTextMatches(editorRef.current, findText, caseSensitive);
+    showFindMatch(matches, 0);
+    if (matches.length === 0) addToast('No matches', 'info');
   };
 
   const findNext = () => {
-    if (findMatches.length === 0) return;
-    const nextIndex = (currentFindIndex + 1) % findMatches.length;
-    setCurrentFindIndex(nextIndex);
-    if (window.find) {
-      try {
-        window.find(findText, caseSensitive, false, true);
-      } catch (e) {
-        window.find(findText, caseSensitive);
-      }
-    }
+    const matches = findMatchesRef.current;
+    if (matches.length === 0) return;
+    showFindMatch(matches, (currentFindIndex + 1) % matches.length);
   };
 
   const findPrevious = () => {
-    if (findMatches.length === 0) return;
-    const prevIndex = (currentFindIndex - 1 + findMatches.length) % findMatches.length;
-    setCurrentFindIndex(prevIndex);
-    if (window.find) {
-      try {
-        window.find(findText, caseSensitive, true, true);
-      } catch (e) {
-        window.find(findText, caseSensitive, true);
-      }
-    }
+    const matches = findMatchesRef.current;
+    if (matches.length === 0) return;
+    showFindMatch(matches, (currentFindIndex - 1 + matches.length) % matches.length);
   };
 
   const handleReplace = (all: boolean = false) => {
     if (!findText || !editorRef.current) return;
     if (all) {
-      const walker = document.createTreeWalker(editorRef.current, NodeFilter.SHOW_TEXT, null);
-      const textNodes: Text[] = [];
-      let node = walker.nextNode();
-      while (node) {
-        textNodes.push(node as Text);
-        node = walker.nextNode();
-      }
-      const flags = caseSensitive ? 'g' : 'gi';
-      const regex = new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), flags);
-      textNodes.forEach(textNode => {
-        if (regex.test(textNode.nodeValue || '')) {
-          textNode.nodeValue = (textNode.nodeValue || '').replace(regex, replaceText);
-        }
-      });
-      onChange(editorRef.current.innerHTML);
+      const count = replaceAllText(editorRef.current, findText, replaceText, caseSensitive);
+      emitDocument();
+      addToast(`Replaced ${count} match${count === 1 ? '' : 'es'}`, count ? 'success' : 'info');
       handleFind();
-    } else {
-      if (window.find && window.find(findText, caseSensitive)) {
-        const selection = window.getSelection();
-        if (selection && selection.toString() === findText) {
-          document.execCommand('insertText', false, replaceText);
-          if (editorRef.current) onChange(editorRef.current.innerHTML);
-          handleFind();
-        }
-      }
+      return;
     }
+    const match = findMatchesRef.current[currentFindIndex];
+    if (!match || !match.node.isConnected) {
+      handleFind();
+      return;
+    }
+    replaceMatch(match, replaceText);
+    emitDocument();
+    handleFind();
   };
 
   const clearFormatting = () => {
@@ -1719,8 +1970,11 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   };
 
   const setFontSizeValue = (size: string) => {
-    execCommand('fontSize', size);
+    if (!editorRef.current) return;
+    restoreSelection();
+    applyFontSize(editorRef.current, parseInt(size, 10) || 12);
     setCurrentFontSize(size);
+    emitDocument();
   };
 
   const setTextColor = (color: string) => {
@@ -1758,41 +2012,56 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        if (modal !== 'none') closeModal();
+        setModal('none');
         setActiveDropdown('none');
         setContextMenu(null);
         setShowShortcutsHelp(false);
+        setOpenMenu('none');
+        clearFindHighlights();
       }
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey) {
-        switch (e.key.toLowerCase()) {
-          case 'f': e.preventDefault(); openModal('findReplace'); break;
-          case 'p': e.preventDefault(); handlePrint(); break;
-          case 's': e.preventDefault(); handleSave(); break;
-          case '/': e.preventDefault(); setShowShortcutsHelp(true); break;
-          case 'b':
-            if (document.activeElement === editorRef.current || editorRef.current?.contains(document.activeElement)) {
-              e.preventDefault();
-              execCommand('bold');
-            }
-            break;
-          case 'i':
-            if (document.activeElement === editorRef.current || editorRef.current?.contains(document.activeElement)) {
-              e.preventDefault();
-              execCommand('italic');
-            }
-            break;
-          case 'u':
-            if (document.activeElement === editorRef.current || editorRef.current?.contains(document.activeElement)) {
-              e.preventDefault();
-              execCommand('underline');
-            }
-            break;
-        }
+        const key = e.key.toLowerCase();
+        const inEditor = document.activeElement === editorRef.current || !!editorRef.current?.contains(document.activeElement);
+        if (key === 'f') { e.preventDefault(); handlersRef.current.find(); }
+        else if (key === 'p') { e.preventDefault(); handlersRef.current.print(); }
+        else if (key === 's') { e.preventDefault(); handlersRef.current.save(); }
+        else if (key === '/') { e.preventDefault(); setShowShortcutsHelp(true); }
+        else if (inEditor && key === 'b') { e.preventDefault(); handlersRef.current.bold(); }
+        else if (inEditor && key === 'i') { e.preventDefault(); handlersRef.current.italic(); }
+        else if (inEditor && key === 'u') { e.preventDefault(); handlersRef.current.underline(); }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [modal]);
+  }, []);
+
+  useEffect(() => {
+    if (!collaborationEnabled || typeof BroadcastChannel === 'undefined') {
+      collabChannelRef.current = null;
+      return;
+    }
+    const channel = new BroadcastChannel(`opensuite:${fileName}`);
+    collabChannelRef.current = channel;
+    channel.onmessage = (event) => {
+      const data = event.data;
+      if (!data || data.sender === clientId.current) return;
+      if (data.type === 'content' && typeof data.content === 'string') {
+        loadJoinedContent(data.content);
+        onChange(data.content);
+      }
+      if (data.type === 'presence' && typeof data.name === 'string') {
+        setCollaborators(prev => prev.includes(data.name) ? prev : [...prev, data.name]);
+      }
+    };
+    const timer = window.setInterval(() => {
+      channel.postMessage({ type: 'presence', name: metaRef.current.properties.author || 'User', sender: clientId.current });
+    }, 4000);
+    return () => {
+      window.clearInterval(timer);
+      channel.close();
+      if (collabChannelRef.current === channel) collabChannelRef.current = null;
+    };
+  }, [collaborationEnabled, fileName, loadJoinedContent, onChange]);
 
   useEffect(() => {
     const editor = editorRef.current;
@@ -1812,7 +2081,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         const htmlContent = lines.map(line => line.trim() ? `<p>${line}</p>` : '<p><br></p>').join('');
         document.execCommand('insertHTML', false, htmlContent);
       }
-      if (editorRef.current) onChange(editorRef.current.innerHTML);
+      if (editorRef.current) emitDocument();
     };
     editor.addEventListener('paste', handlePaste);
     return () => editor.removeEventListener('paste', handlePaste);
@@ -1872,6 +2141,172 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       </div>
     </div>
   );
+
+  const setZoomTo = (value: number) => {
+    const next = Math.min(200, Math.max(50, Math.round(value)));
+    setZoom(next);
+    setZoomInput(String(next));
+  };
+
+  const openThesaurus = () => {
+    saveSelection();
+    setThesaurusWord((window.getSelection()?.toString() || '').trim());
+    setModal('thesaurus');
+  };
+
+  const applyTemplate = (name: string) => {
+    const html = DOCUMENT_TEMPLATES[name];
+    if (!html || !editorRef.current) return;
+    if ((editorRef.current.textContent || '').trim() && !window.confirm(`Replace the current document with “${name}”?`)) return;
+    editorRef.current.innerHTML = html;
+    emitDocument();
+    closeModal();
+    addToast(`${name} inserted`, 'success');
+  };
+
+  const downloadBackup = () => {
+    if (!editorRef.current) return;
+    const joined = joinDocument(readCleanHtml(editorRef.current), metaRef.current);
+    const url = URL.createObjectURL(new Blob([joined], { type: 'text/html' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = fileName.replace(/\.\w+$/, '.osuite.html');
+    a.click();
+    URL.revokeObjectURL(url);
+    addToast('Backup downloaded. You can upload that file to Drive, OneDrive, or Dropbox.', 'success');
+  };
+
+  const importBackup = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || '');
+      loadJoinedContent(text);
+      onChange(text);
+      closeModal();
+      addToast('Backup opened', 'success');
+    };
+    reader.readAsText(file);
+  };
+
+  const inviteCollaborator = () => {
+    const name = inviteName.trim();
+    if (!name) {
+      addToast('Enter a name to invite', 'warning');
+      return;
+    }
+    setCollaborators(prev => prev.includes(name) ? prev : [...prev, name]);
+    const message = `Open “${fileName}” in another browser tab and turn on collaboration. Edits sync live between tabs on this computer.`;
+    navigator.clipboard?.writeText(message).catch(() => undefined);
+    setInviteName('');
+    addToast('Invite copied to the clipboard', 'success');
+  };
+
+  const runAddin = (id: string) => {
+    restoreSelection();
+    if (id === 'date') execCommand('insertText', new Date().toLocaleDateString(undefined, { dateStyle: 'long' }));
+    else {
+      const addin = BUILTIN_ADDINS.find(item => item.id === id);
+      if (addin?.html) execCommand('insertHTML', addin.html);
+    }
+    closeModal();
+  };
+
+  const insertWordArt = () => {
+    restoreSelection();
+    execCommand('insertHTML', `<div class="os-wordart os-wordart-${wordArtStyle}">${escapeHtml(wordArtText.trim() || 'WordArt')}</div><p><br></p>`);
+    closeModal();
+  };
+
+  const markIndexEntry = () => {
+    restoreSelection();
+    const term = window.getSelection()?.toString().trim() || '';
+    if (!term) {
+      addToast('Select a word to mark as an index entry', 'warning');
+      return;
+    }
+    document.execCommand('insertHTML', false, `<span class="os-index" id="idx-${Date.now()}">${escapeHtml(term)}</span>`);
+    emitDocument();
+    addToast('Index entry marked', 'success');
+  };
+
+  const insertIndex = () => {
+    if (!editorRef.current) return;
+    const entries = Array.from(editorRef.current.querySelectorAll('.os-index'))
+      .map(el => ({ term: (el.textContent || '').trim(), id: el.id }))
+      .filter(entry => entry.term && entry.id)
+      .sort((a, b) => a.term.localeCompare(b.term));
+    const items = entries.map(entry => `<li><a href="#${entry.id}">${escapeHtml(entry.term)}</a></li>`).join('');
+    execCommand('insertHTML', `<h2 id="document-index">Index</h2><ul>${items || '<li>No index entries yet.</li>'}</ul>`);
+    closeModal();
+  };
+
+  const insertCaptionNow = () => {
+    restoreSelection();
+    const number = (editorRef.current?.querySelectorAll('.os-caption').length || 0) + 1;
+    execCommand('insertHTML', `<p class="os-caption" id="caption-${number}"><strong>Figure ${number}.</strong> ${escapeHtml(captionText.trim() || 'Caption')}</p>`);
+    setCaptionText('');
+    closeModal();
+  };
+
+  const referenceTargets = () => {
+    if (!editorRef.current) return [] as Array<{ id: string; label: string; element: HTMLElement }>;
+    return Array.from(editorRef.current.querySelectorAll('h1, h2, h3, .os-caption, .os-footnote-ref')).map((el, index) => {
+      const element = el as HTMLElement;
+      const id = element.id || `ref-${index + 1}`;
+      const label = element.classList.contains('os-footnote-ref') ? `Note ${element.textContent}` : (element.textContent || 'Item');
+      return { id, label, element };
+    });
+  };
+
+  const runCompare = () => {
+    setCompareDiff(diffLines(editorRef.current?.innerText || '', compareText));
+  };
+
+  const acceptChange = (el: HTMLElement) => {
+    if (el.tagName === 'INS') {
+      const parent = el.parentNode;
+      while (el.firstChild) parent?.insertBefore(el.firstChild, el);
+      el.remove();
+    } else el.remove();
+    emitDocument();
+    setReviewTick(tick => tick + 1);
+  };
+
+  const rejectChange = (el: HTMLElement) => {
+    if (el.tagName === 'DEL') {
+      const parent = el.parentNode;
+      while (el.firstChild) parent?.insertBefore(el.firstChild, el);
+      el.remove();
+    } else el.remove();
+    emitDocument();
+    setReviewTick(tick => tick + 1);
+  };
+
+  const commitProtection = () => {
+    if (documentProtected) {
+      if (protectionPassword) setProtectionHash(hashPassword(protectionPassword));
+      addToast(protectionPassword ? 'Document locked with a password' : 'Document is read-only', 'success');
+      closeModal();
+      return;
+    }
+    if (protectionHash) {
+      const entered = window.prompt('Enter the password to turn protection off') || '';
+      if (hashPassword(entered) !== protectionHash) {
+        setDocumentProtected(true);
+        addToast('Wrong password', 'error');
+        return;
+      }
+      setProtectionHash('');
+      setProtectionPassword('');
+    }
+    addToast('Protection removed', 'info');
+    closeModal();
+  };
+
+  const page = pageDimensions(pageSetup);
+  const trackedNodes = reviewTick >= 0 ? Array.from(editorRef.current?.querySelectorAll('ins.os-ins, del.os-del') || []) as HTMLElement[] : [];
+  const menuItemClass = 'block w-full text-left px-3 py-1.5 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-800';
+  const closeMenus = () => setOpenMenu('none');
 
   return (
     <ErrorBoundary>
@@ -1975,20 +2410,101 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
           <Zap className="w-3.5 h-3.5" /> Status
         </button>
         
+    <div className="flex flex-col h-full bg-gray-100 dark:bg-gray-800" onMouseDown={() => { if (openMenu !== 'none') closeMenus(); }}>
+      <div className="no-print bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-3 py-1.5 flex items-center gap-1 text-sm overflow-x-auto" onMouseDown={keepEditorSelection}>
+        {([
+          ['file', t('file', currentLanguage)],
+          ['view', t('view', currentLanguage)],
+          ['insert', t('insert', currentLanguage)],
+          ['tools', t('tools', currentLanguage)],
+        ] as const).map(([id, label]) => (
+          <div key={id} className="relative" onMouseDown={(e) => { keepEditorSelection(e); e.stopPropagation(); }}>
+            <button onClick={() => setOpenMenu(openMenu === id ? 'none' : id)} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">{label}</button>
+            {openMenu === id && id === 'file' && (
+              <div className="absolute top-full left-0 mt-1 z-50 min-w-52 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1">
+                <button className={menuItemClass} onClick={() => { handleSave(); closeMenus(); }}>{t('save', currentLanguage)}</button>
+                <button className={menuItemClass} onClick={() => { handleExportHtml(); closeMenus(); }}>{t('export', currentLanguage)} HTML</button>
+                <button className={menuItemClass} onClick={() => { handleExport(); closeMenus(); }}>{t('export', currentLanguage)} DOCX</button>
+                <button className={menuItemClass} onClick={() => { handlePrint(); closeMenus(); }}>{t('print', currentLanguage)}</button>
+                <button className={menuItemClass} onClick={() => { openModal('documentProperties'); closeMenus(); }}>{t('file', currentLanguage)} properties</button>
+                <button className={menuItemClass} onClick={() => { openModal('pageSetup'); closeMenus(); }}>Page setup</button>
+                <button className={menuItemClass} onClick={() => { openModal('templates'); closeMenus(); }}>Templates</button>
+              </div>
+            )}
+            {openMenu === id && id === 'view' && (
+              <div className="absolute top-full left-0 mt-1 z-50 min-w-52 bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1">
+                <button className={menuItemClass} onClick={() => { setShowRuler(!showRuler); closeMenus(); }}>{showRuler ? 'Hide ruler' : 'Show ruler'}</button>
+                <button className={menuItemClass} onClick={() => { setShowHeaders(!showHeaders); closeMenus(); }}>{showHeaders ? 'Hide header and footer' : 'Show header and footer'}</button>
+                <button className={menuItemClass} onClick={() => { setShowLineNumbers(!showLineNumbers); closeMenus(); }}>{showLineNumbers ? 'Hide line numbers' : 'Show line numbers'}</button>
+                <button className={menuItemClass} onClick={() => { setShowPageNumbers(!showPageNumbers); closeMenus(); }}>{showPageNumbers ? 'Hide page numbers' : 'Show page numbers'}</button>
+                <button className={menuItemClass} onClick={() => { setZoomTo(100); closeMenus(); }}>Zoom 100%</button>
+                <button className={menuItemClass} onClick={() => { openPrintPreview(); closeMenus(); }}>Print preview</button>
+              </div>
+            )}
+            {openMenu === id && id === 'insert' && (
+              <div className="absolute top-full left-0 mt-1 z-50 min-w-56 max-h-80 overflow-y-auto bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1">
+                <button className={menuItemClass} onClick={() => { openModal('insertImage'); closeMenus(); }}>Image</button>
+                <button className={menuItemClass} onClick={() => { openModal('insertTable'); closeMenus(); }}>Table</button>
+                <button className={menuItemClass} onClick={() => { openModal('insertChart'); closeMenus(); }}>Chart</button>
+                <button className={menuItemClass} onClick={() => { openModal('wordArt'); closeMenus(); }}>WordArt</button>
+                <button className={menuItemClass} onClick={() => { openModal('textBoxes'); closeMenus(); }}>Text box</button>
+                <button className={menuItemClass} onClick={() => { openModal('shapes'); closeMenus(); }}>Shape</button>
+                <button className={menuItemClass} onClick={() => { openModal('tableOfContents'); closeMenus(); }}>Table of contents</button>
+                <button className={menuItemClass} onClick={() => { openModal('footnotes'); closeMenus(); }}>Footnote</button>
+                <button className={menuItemClass} onClick={() => { openModal('caption'); closeMenus(); }}>Caption</button>
+                <button className={menuItemClass} onClick={() => { openModal('crossReference'); closeMenus(); }}>Cross-reference</button>
+                <button className={menuItemClass} onClick={() => { markIndexEntry(); closeMenus(); }}>Mark index entry</button>
+                <button className={menuItemClass} onClick={() => { openModal('index'); closeMenus(); }}>Index</button>
+                <button className={menuItemClass} onClick={() => { openModal('bibliography'); closeMenus(); }}>Bibliography</button>
+                <button className={menuItemClass} onClick={() => { insertPageBreak(); closeMenus(); }}>Page break</button>
+                <button className={menuItemClass} onClick={() => { insertSectionBreak(); closeMenus(); }}>Section break</button>
+                <button className={menuItemClass} onClick={() => { openModal('specialChars'); closeMenus(); }}>Special character</button>
+              </div>
+            )}
+            {openMenu === id && id === 'tools' && (
+              <div className="absolute top-full left-0 mt-1 z-50 min-w-56 max-h-80 overflow-y-auto bg-white dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg py-1">
+                <button className={menuItemClass} onClick={() => { checkSpelling(); closeMenus(); }}>Spelling</button>
+                <button className={menuItemClass} onClick={() => { runGrammarCheck(); closeMenus(); }}>Grammar</button>
+                <button className={menuItemClass} onClick={() => { runAutoCorrect(); closeMenus(); }}>Auto-correct now</button>
+                <button className={menuItemClass} onClick={() => { openThesaurus(); closeMenus(); }}>Thesaurus</button>
+                <button className={menuItemClass} onClick={() => { showReadabilityStats(); closeMenus(); }}>Readability</button>
+                <button className={menuItemClass} onClick={() => { openModal('wordCountGoals'); closeMenus(); }}>Word-count goal</button>
+                <button className={menuItemClass} onClick={() => { openModal('mailMerge'); closeMenus(); }}>Mail merge</button>
+                <button className={menuItemClass} onClick={() => { openModal('textTransform'); closeMenus(); }}>Transform text</button>
+                <button className={menuItemClass} onClick={() => { openModal('dropCap'); closeMenus(); }}>Drop cap</button>
+                <button className={menuItemClass} onClick={() => { openModal('themes'); closeMenus(); }}>Theme</button>
+                <button className={menuItemClass} onClick={() => { openModal('language'); closeMenus(); }}>Language</button>
+                <button className={menuItemClass} onClick={() => { openModal('macros'); closeMenus(); }}>Macros</button>
+                <button className={menuItemClass} onClick={() => { openModal('addIns'); closeMenus(); }}>Add-ins</button>
+                <button className={menuItemClass} onClick={() => { openModal('compareDocuments'); closeMenus(); }}>Compare documents</button>
+                <button className={menuItemClass} onClick={() => { openModal('watermarks'); closeMenus(); }}>Watermark</button>
+                <button className={menuItemClass} onClick={() => { openModal('columns'); closeMenus(); }}>Columns</button>
+                <button className={menuItemClass} onClick={() => { setTrackChangesEnabled(!trackChangesEnabled); closeMenus(); }}>{trackChangesEnabled ? 'Stop tracking changes' : 'Track changes'}</button>
+                <button className={menuItemClass} onClick={() => { setShowComments(true); openModal('comments'); closeMenus(); }}>Comment</button>
+                <button className={menuItemClass} onClick={() => { openModal('collaboration'); closeMenus(); }}>Collaboration</button>
+                <button className={menuItemClass} onClick={() => { openModal('documentProtection'); closeMenus(); }}>Protect document</button>
+                <button className={menuItemClass} onClick={() => { openModal('cloudStorage'); closeMenus(); }}>Save a copy</button>
+                <button className={menuItemClass} onClick={() => { openModal('autoSave'); closeMenus(); }}>Auto-save</button>
+                <button className={menuItemClass} onClick={() => { setShowShortcuts(true); closeMenus(); }}>Keyboard shortcuts</button>
+                <button className={menuItemClass} onClick={() => { setShowHelp(true); closeMenus(); }}>Help</button>
+                <button className={menuItemClass} onClick={() => { setShowBackup(true); closeMenus(); }}>Backup</button>
+                <button className={menuItemClass} onClick={() => { setShowMonitoring(true); closeMenus(); }}>Status</button>
+              </div>
+            )}
+          </div>
+        ))}
+        <button onClick={() => execCommand('undo')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">{t('undo', currentLanguage)}</button>
+        <button onClick={() => execCommand('redo')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">{t('redo', currentLanguage)}</button>
+        <button onClick={() => setTrackChangesEnabled(!trackChangesEnabled)} className={`px-2 py-1 rounded whitespace-nowrap ${trackChangesEnabled ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-600' : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300'}`}>Track</button>
+        <button onClick={() => setShowComments(!showComments)} className={`px-2 py-1 rounded flex items-center gap-1 whitespace-nowrap ${showComments ? 'bg-blue-100 text-blue-600' : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300'}`}><MessageSquare className="w-3.5 h-3.5" /> {comments.length}</button>
         <div className="flex-1" />
-        <button onClick={handleSave} title="Save (Ctrl+S)" className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
-          <Save className="w-4 h-4 text-gray-600 dark:text-gray-400" />
-        </button>
-        <button onClick={handlePrint} title="Print (Ctrl+P)" className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
-          <Printer className="w-4 h-4 text-gray-600 dark:text-gray-400" />
-        </button>
-        <button onClick={handleExport} title="Export DOCX" className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded">
-          <FileDown className="w-4 h-4 text-gray-600 dark:text-gray-400" />
-        </button>
+        <button onClick={handleSave} title={`${t('save', currentLanguage)} (Ctrl+S)`} className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><Save className="w-4 h-4 text-gray-600 dark:text-gray-400" /></button>
+        <button onClick={handlePrint} title={`${t('print', currentLanguage)} (Ctrl+P)`} className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><Printer className="w-4 h-4 text-gray-600 dark:text-gray-400" /></button>
+        <button onClick={handleExport} title="Export DOCX" className="p-1.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><FileDown className="w-4 h-4 text-gray-600 dark:text-gray-400" /></button>
       </div>
 
       {/* Main Toolbar */}
-      <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-2 py-1.5">
+      <div className="no-print bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-2 py-1.5" onMouseDown={keepEditorSelection}>
         <div className="flex items-center gap-0.5 flex-wrap">
           <ToolbarButton icon={Undo} action={() => execCommand('undo')} title="Undo (Ctrl+Z)" />
           <ToolbarButton icon={Redo} action={() => execCommand('redo')} title="Redo (Ctrl+Y)" />
@@ -2010,19 +2526,15 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             )}
           </div>
 
-          <select value={currentFontSize} onChange={(e) => setFontSizeValue(e.target.value)} className="px-2 py-1 border border-gray-200 dark:border-gray-700 rounded text-sm bg-white dark:bg-gray-900 ml-1">
-            <option value="1">8</option>
-            <option value="2">10</option>
-            <option value="3">12</option>
-            <option value="4">14</option>
-            <option value="5">18</option>
-            <option value="6">24</option>
-            <option value="7">36</option>
+          <select value={currentFontSize} onMouseDown={saveSelection} onChange={(e) => setFontSizeValue(e.target.value)} className="px-2 py-1 border border-gray-200 dark:border-gray-700 rounded text-sm bg-white dark:bg-gray-900 ml-1">
+            {FONT_PT_SIZES.map(size => (
+              <option key={size} value={String(size)}>{size}</option>
+            ))}
           </select>
 
           <ToolbarDivider />
 
-          <select onChange={(e) => execCommand('formatBlock', e.target.value)} defaultValue="p" className="px-2 py-1 border border-gray-200 dark:border-gray-700 rounded text-sm bg-white dark:bg-gray-900">
+          <select value={currentBlock} onMouseDown={saveSelection} onChange={(e) => { restoreSelection(); setCurrentBlock(e.target.value); execCommand('formatBlock', e.target.value); }} className="px-2 py-1 border border-gray-200 dark:border-gray-700 rounded text-sm bg-white dark:bg-gray-900">
             <option value="p">Normal</option>
             <option value="h1">Heading 1</option>
             <option value="h2">Heading 2</option>
@@ -2211,13 +2723,14 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             
             {/* Table Operations */}
             <ToolbarButton icon={Trash2} action={deleteTable} title="Delete Table" />
+            <button onClick={mergeSelectedCells} className="px-2 py-1 text-xs rounded hover:bg-blue-100 dark:hover:bg-blue-900/40 text-blue-700 dark:text-blue-300">Merge</button>
           </div>
         </div>
       )}
 
       {/* Feature 41: Headers/Footers */}
       {showHeaders && (
-        <div className="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-2">
+        <div className="no-print bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-4 py-2">
           <div className="flex gap-4">
             <div className="flex-1">
               <label className="text-xs font-medium text-gray-600 dark:text-gray-400 block mb-1">Header</label>
@@ -2241,101 +2754,102 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         </div>
       )}
 
-      {/* Ruler */}
       {showRuler && (
-        <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 h-6 flex items-center px-4 overflow-hidden">
-          <div className="flex-1 relative h-full flex items-center">
-            <div className="absolute inset-x-0 flex items-end h-full">
-              {Array.from({ length: 17 }, (_, i) => (
-                <div key={i} className="flex-1 flex items-end relative">
-                  <div className="w-px h-3 bg-gray-400 dark:bg-gray-600"></div>
-                  <span className="absolute left-1 bottom-0 text-[9px] text-gray-500 dark:text-gray-400">{i}</span>
-                  <div className="flex-1 flex items-end">
-                    <div className="w-px h-1.5 bg-gray-300 dark:bg-gray-700 mx-auto"></div>
-                  </div>
-                </div>
-              ))}
-            </div>
+        <div className="no-print bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 h-6 flex items-end justify-center overflow-hidden">
+          <div className="relative h-full" style={{ width: page.width }}>
+            {Array.from({ length: Math.ceil(page.width / 96) + 1 }, (_, inch) => (
+              <div key={inch} className="absolute bottom-0" style={{ left: inch * 96 }}>
+                <div className="w-px h-3 bg-gray-500" />
+                <span className="absolute left-1 bottom-0 text-[9px] text-gray-500">{inch}</span>
+              </div>
+            ))}
+            <div className="absolute bottom-0 w-px h-4 bg-blue-500" style={{ left: pageSetup.margins.left }} />
+            <div className="absolute bottom-0 w-px h-4 bg-blue-500" style={{ right: pageSetup.margins.right }} />
           </div>
         </div>
       )}
 
-      {/* Editor Area */}
-      <div 
-        className="flex-1 overflow-y-auto bg-gray-200 dark:bg-gray-800 p-4 md:p-8 relative"
+      {pendingDraft && (
+        <div className="no-print bg-amber-50 dark:bg-amber-900/30 border-b border-amber-200 px-4 py-2 text-sm flex items-center justify-between gap-3">
+          <span>A saved copy of this file is on this computer.</span>
+          <span className="flex gap-2">
+            <button className="px-2 py-1 bg-amber-500 text-white rounded" onClick={() => { if (pendingDraft) { loadJoinedContent(pendingDraft); onChange(pendingDraft); setPendingDraft(null); addToast('Saved copy restored', 'success'); } }}>Restore</button>
+            <button className="px-2 py-1 rounded hover:bg-amber-100" onClick={() => setPendingDraft(null)}>Dismiss</button>
+          </span>
+        </div>
+      )}
+
+      <div className="flex flex-1 min-h-0">
+      <div
+        className="flex-1 overflow-auto bg-gray-200 dark:bg-gray-800 p-4 md:p-8 relative"
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onContextMenu={handleContextMenu}
       >
-        {/* Feature 49: Watermark */}
-        {showWatermark && watermarkText && (
-          <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-0">
-            <div className="text-7xl text-gray-300 dark:text-gray-700 opacity-20 -rotate-45 font-bold">
-              {watermarkText}
-            </div>
-          </div>
-        )}
-        
-        {/* Loading overlay */}
         {isLoading && (
           <div className="absolute inset-0 bg-white/80 dark:bg-gray-900/80 flex items-center justify-center z-50">
-            <div className="text-center">
-              <div className="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full mx-auto mb-4"></div>
-              <p className="text-gray-600 dark:text-gray-400">Loading...</p>
-            </div>
+            <div className="animate-spin w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full" />
           </div>
         )}
-        
+        <div style={{ width: page.width * zoom / 100, minHeight: page.height * zoom / 100 }} className="mx-auto">
         <div
-          className="mx-auto bg-white dark:bg-gray-900 shadow-lg relative z-10"
+          className="bg-white dark:bg-gray-900 shadow-lg relative"
           style={{
-            width: pageSetup.orientation === 'landscape' ? `${PAGE_HEIGHT_A4}px` : `${PAGE_WIDTH_A4}px`,
-            maxWidth: '100%',
+            width: page.width,
+            minHeight: page.height,
             transform: `scale(${zoom / 100})`,
-            transformOrigin: 'top center',
+            transformOrigin: 'top left',
             padding: `${pageSetup.margins.top}px ${pageSetup.margins.right}px ${pageSetup.margins.bottom}px ${pageSetup.margins.left}px`,
           }}
         >
-          {/* Feature 41: Header */}
-          {showHeaders && headerText && (
-            <div className="border-b border-gray-300 dark:border-gray-700 px-16 py-2 text-center text-sm text-gray-500 dark:text-gray-400">
-              {headerText}
+          {showWatermark && watermarkText && (
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-0 overflow-hidden">
+              <div className="text-7xl text-gray-300 dark:text-gray-700 opacity-30 -rotate-45 font-bold whitespace-nowrap">{watermarkText}</div>
             </div>
           )}
-          
+          {showHeaders && headerText && (
+            <div className="border-b border-gray-300 dark:border-gray-700 pb-2 mb-4 text-center text-sm text-gray-500">{headerText}</div>
+          )}
           <div
             ref={editorRef}
             contentEditable={!readOnly && !documentProtected}
+            spellCheck
+            dir={currentLanguage === 'ar' ? 'rtl' : 'ltr'}
             onInput={handleInput}
-            onMouseUp={() => {
-              handleTableCellMouseUp();
-            }}
+            onBeforeInput={handleBeforeInput}
+            onMouseUp={handleTableCellMouseUp}
             onClick={(e) => {
-              // Handle Ctrl/Cmd+Click for multi-selection
-              const target = e.target as HTMLElement;
-              if (target.tagName === 'TD' || target.tagName === 'TH') {
-                handleTableCellClick(e, target as HTMLTableCellElement);
-              }
+              const cell = (e.target as HTMLElement).closest('td, th') as HTMLTableCellElement | null;
+              if (cell) handleTableCellClick(e, cell);
             }}
             onMouseDown={(e) => {
-              // Prevent default text selection when starting drag on table cells
               const target = e.target as HTMLElement;
-              if (target.tagName === 'TD' || target.tagName === 'TH') {
-                handleTableCellMouseDown(e, target as HTMLTableCellElement);
+              const handle = target.closest('.os-handle') as HTMLElement | null;
+              if (handle?.parentElement) {
+                e.preventDefault();
+                const el = handle.parentElement;
+                objectDragRef.current = { el, startX: e.clientX, startY: e.clientY, originLeft: parseFloat(el.style.left) || 0, originTop: parseFloat(el.style.top) || 0 };
+                return;
               }
+              const cell = target.closest('td, th') as HTMLTableCellElement | null;
+              if (cell) handleTableCellMouseDown(e, cell);
             }}
             onMouseMove={(e) => {
-              // Handle drag selection - prevent default to avoid text selection
-              if (isSelectingCells && e.buttons === 1) {
-                e.preventDefault();
+              if (columnResizeRef.current && e.buttons === 1) {
+                const resize = columnResizeRef.current;
+                resize.cell.style.width = `${Math.max(40, resize.startWidth + e.clientX - resize.startX)}px`;
+                return;
               }
-              
-              const target = e.target as HTMLElement;
-              if (target.tagName === 'TD' || target.tagName === 'TH') {
-                handleTableCellMouseEnter(e, target as HTMLTableCellElement);
+              if (objectDragRef.current && e.buttons === 1) {
+                const drag = objectDragRef.current;
+                drag.el.style.left = `${drag.originLeft + e.clientX - drag.startX}px`;
+                drag.el.style.top = `${drag.originTop + e.clientY - drag.startY}px`;
+                return;
               }
+              const cell = (e.target as HTMLElement).closest('td, th') as HTMLTableCellElement | null;
+              if (cell) handleTableCellMouseEnter(e, cell);
             }}
-            className="prose prose-lg dark:prose-invert max-w-none p-16 md:p-24 min-h-[1056px] focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+            className={`os-editor prose prose-lg dark:prose-invert max-w-none min-h-[640px] focus:outline-none relative z-10 ${showLineNumbers ? 'show-lines pl-8' : ''}`}
             suppressContentEditableWarning
             style={{ lineHeight: '1.8' }}
             role="textbox"
@@ -2343,95 +2857,75 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             aria-label="Document editor"
             aria-readonly={readOnly || documentProtected}
           />
-          
-          {/* Feature 41: Footer */}
           {showHeaders && footerText && (
-            <div className="border-t border-gray-300 dark:border-gray-700 px-16 py-2 text-center text-sm text-gray-500 dark:text-gray-400">
-              {footerText}
+            <div className="border-t border-gray-300 dark:border-gray-700 pt-2 mt-4 text-center text-sm text-gray-500">{footerText}</div>
+          )}
+          {showPageNumbers && (
+            <div className={`absolute text-xs text-gray-500 ${pageNumberStyle === 'top-center' ? 'top-3 left-0 right-0 text-center' : pageNumberStyle === 'top-right' ? 'top-3 right-6' : pageNumberStyle === 'bottom-right' ? 'bottom-3 right-6' : 'bottom-3 left-0 right-0 text-center'}`}>
+              Page 1 of {pageCount}
             </div>
           )}
         </div>
+        </div>
       </div>
 
-      {/* Feature 52: Comments Panel */}
-      {showComments && (
-        <div className="w-80 bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-700 overflow-y-auto">
-          <div className="p-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
-            <h3 className="font-semibold text-sm">Comments ({comments.length})</h3>
-            <button 
-              onClick={() => openModal('comments')}
-              className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"
-              title="Add comment"
-            >
-              <Plus className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="p-3 space-y-3">
-            {comments.map(comment => (
-              <div key={comment.id} className="bg-gray-50 dark:bg-gray-800 rounded p-3">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-gray-700 dark:text-gray-300">{comment.author}</span>
-                    <span className="text-xs text-gray-500">{comment.timestamp.toLocaleTimeString()}</span>
+      {(showComments || trackChangesEnabled) && (
+        <aside className="no-print w-80 shrink-0 bg-white dark:bg-gray-900 border-l border-gray-200 dark:border-gray-700 overflow-y-auto">
+          {showComments && (
+            <div>
+              <div className="p-3 border-b border-gray-200 dark:border-gray-700 flex items-center justify-between">
+                <h3 className="font-semibold text-sm">Comments ({comments.length})</h3>
+                <button onClick={() => openModal('comments')} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded" title="Add comment"><Plus className="w-4 h-4" /></button>
+              </div>
+              <div className="p-3 space-y-3">
+                {comments.map(comment => (
+                  <div key={comment.id} className="bg-gray-50 dark:bg-gray-800 rounded p-3 cursor-pointer" onClick={() => focusComment(comment.id)}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-medium">{comment.author}</span>
+                      <button onClick={(e) => { e.stopPropagation(); deleteComment(comment.id); }} className="p-1 hover:bg-red-100 rounded" title="Delete"><Trash2 className="w-3 h-3 text-red-500" /></button>
+                    </div>
+                    {comment.quote && <p className="text-xs italic text-gray-500 mb-1">“{comment.quote}”</p>}
+                    {editingCommentId === comment.id ? (
+                      <div className="space-y-2" onClick={(e) => e.stopPropagation()}>
+                        <textarea value={editingCommentText} onChange={(e) => setEditingCommentText(e.target.value)} className="w-full text-sm border rounded px-2 py-1 bg-white dark:bg-gray-900" rows={3} />
+                        <button onClick={saveEditComment} className="px-2 py-1 text-xs bg-blue-500 text-white rounded">Save</button>
+                        <button onClick={cancelEditComment} className="px-2 py-1 text-xs ml-2 rounded bg-gray-200">Cancel</button>
+                      </div>
+                    ) : (
+                      <p className="text-sm">{comment.text}</p>
+                    )}
                   </div>
-                  <div className="flex gap-1">
-                    <button 
-                      onClick={() => startEditComment(comment)}
-                      className="p-1 hover:bg-gray-200 dark:hover:bg-gray-700 rounded"
-                      title="Edit"
-                    >
-                      <Edit3 className="w-3 h-3" />
-                    </button>
-                    <button 
-                      onClick={() => deleteComment(comment.id)}
-                      className="p-1 hover:bg-red-100 dark:hover:bg-red-900/30 rounded"
-                      title="Delete"
-                    >
-                      <Trash2 className="w-3 h-3 text-red-500" />
-                    </button>
-                  </div>
-                </div>
-                {editingCommentId === comment.id ? (
-                  <div className="space-y-2">
-                    <textarea
-                      value={editingCommentText}
-                      onChange={(e) => setEditingCommentText(e.target.value)}
-                      className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1 bg-white dark:bg-gray-900 resize-none"
-                      rows={3}
-                      autoFocus
-                    />
+                ))}
+                {comments.length === 0 && <p className="text-sm text-gray-500 text-center py-4">No comments yet.</p>}
+              </div>
+            </div>
+          )}
+          {trackChangesEnabled && (
+            <div className="border-t border-gray-200 dark:border-gray-700">
+              <div className="p-3 font-semibold text-sm">Changes ({trackedNodes.length})</div>
+              <div className="p-3 space-y-2">
+                {trackedNodes.map((node, index) => (
+                  <div key={`${node.dataset.time || index}`} className="border rounded p-2 text-sm">
+                    <div className="mb-2">{node.tagName === 'INS' ? 'Inserted' : 'Deleted'}: {node.textContent}</div>
                     <div className="flex gap-2">
-                      <button 
-                        onClick={saveEditComment}
-                        className="px-2 py-1 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded"
-                      >
-                        Save
-                      </button>
-                      <button 
-                        onClick={cancelEditComment}
-                        className="px-2 py-1 text-xs bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded"
-                      >
-                        Cancel
-                      </button>
+                      <button onClick={() => acceptChange(node)} className="px-2 py-1 text-xs bg-green-500 text-white rounded">Accept</button>
+                      <button onClick={() => rejectChange(node)} className="px-2 py-1 text-xs bg-gray-200 rounded">Reject</button>
                     </div>
                   </div>
-                ) : (
-                  <p className="text-sm text-gray-600 dark:text-gray-400">{comment.text}</p>
-                )}
+                ))}
+                {trackedNodes.length === 0 && <p className="text-sm text-gray-500">Edits you make now are marked.</p>}
               </div>
-            ))}
-            {comments.length === 0 && (
-              <p className="text-sm text-gray-500 text-center py-4">No comments yet. Click + to add one.</p>
-            )}
-          </div>
-        </div>
+            </div>
+          )}
+        </aside>
       )}
+      </div>
 
       {/* Status Bar */}
-      <div className="bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 px-4 py-1.5 flex items-center gap-4 text-xs text-gray-600 dark:text-gray-400">
-        <span>{stats.words} words</span>
-        <span>{stats.chars} characters</span>
-        <span>{stats.paragraphs} paragraphs</span>
+      <div className="no-print bg-white dark:bg-gray-900 border-t border-gray-200 dark:border-gray-700 px-4 py-1.5 flex items-center gap-4 text-xs text-gray-600 dark:text-gray-400">
+        <span>{stats.words} {t('words', currentLanguage)}</span>
+        <span>{stats.chars} {t('characters', currentLanguage)}</span>
+        <span>{stats.paragraphs} {t('paragraphs', currentLanguage)}</span>
         
         {/* Feature 57: Reading time */}
         <span className="flex items-center gap-1">
@@ -2454,7 +2948,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
         
         <div className="flex-1" />
         <div className="flex items-center gap-1">
-          <button onClick={() => setZoom(Math.max(50, zoom - 10))} className="p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded" aria-label="Zoom out">
+          <button onClick={() => setZoomTo(zoom - 10)} className="p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded" aria-label="Zoom out">
             <ZoomOut className="w-3.5 h-3.5" />
           </button>
           <input
@@ -2473,7 +2967,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             max="200"
             aria-label="Zoom percentage"
           />
-          <button onClick={() => setZoom(Math.min(200, zoom + 10))} className="p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded" aria-label="Zoom in">
+          <button onClick={() => setZoomTo(zoom + 10)} className="p-0.5 hover:bg-gray-100 dark:hover:bg-gray-800 rounded" aria-label="Zoom in">
             <ZoomIn className="w-3.5 h-3.5" />
           </button>
           {/* Zoom presets */}
@@ -2481,7 +2975,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
             {[50, 75, 100, 125, 150, 200].map(preset => (
               <button
                 key={preset}
-                onClick={() => { setZoom(preset); setZoomInput(String(preset)); }}
+                onClick={() => setZoomTo(preset)}
                 className={`px-1.5 py-0.5 text-xs rounded ${zoom === preset ? 'bg-blue-500 text-white' : 'hover:bg-gray-100 dark:hover:bg-gray-800'}`}
                 aria-label={`Zoom to ${preset}%`}
               >
@@ -2588,7 +3082,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
               </div>
               <div className="p-4 space-y-2">
                 {[1, 1.15, 1.5, 2, 2.5, 3].map(val => (
-                  <button key={val} onClick={() => { setLineSpacingValue(val); if (editorRef.current) { const blocks = editorRef.current.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, div'); blocks.forEach(el => { (el as HTMLElement).style.lineHeight = String(val); }); onChange(editorRef.current.innerHTML); } }} className={`w-full px-3 py-2 rounded text-sm text-left transition-colors ${lineSpacingValue === val ? 'bg-blue-500 text-white' : 'hover:bg-gray-100 dark:hover:bg-gray-800'}`}>{val}</button>
+                  <button key={val} onClick={() => applyLineSpacing(val)} className={`w-full px-3 py-2 rounded text-sm text-left transition-colors ${lineSpacingValue === val ? 'bg-blue-500 text-white' : 'hover:bg-gray-100 dark:hover:bg-gray-800'}`}>{val}</button>
                 ))}
               </div>
             </div>
@@ -2738,24 +3232,12 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                 <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
               </div>
               <div className="p-4">
-                <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">Select a word in the document, then click a synonym to replace it.</p>
-                <div className="space-y-3">
-                  {Object.entries(THESAURUS).map(([word, synonyms]) => (
-                    <div key={word} className="border border-gray-200 dark:border-gray-700 rounded p-3">
-                      <div className="font-medium text-sm mb-2 text-gray-900 dark:text-gray-100">{word}</div>
-                      <div className="flex flex-wrap gap-1">
-                        {synonyms.map(synonym => (
-                          <button 
-                            key={synonym} 
-                            onClick={() => replaceWithSynonym(synonym)}
-                            className="px-2 py-1 text-xs bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 hover:bg-blue-200 dark:hover:bg-blue-900/50 rounded transition-colors"
-                          >
-                            {synonym}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
+                <p className="text-sm text-gray-600 dark:text-gray-400 mb-3">{thesaurusWord ? `Synonyms for “${thesaurusWord}”` : 'Select a word, then open the thesaurus.'}</p>
+                <div className="flex flex-wrap gap-1">
+                  {lookupSynonyms(thesaurusWord).map(synonym => (
+                    <button key={synonym} onClick={() => replaceWithSynonym(synonym)} className="px-2 py-1 text-xs bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 hover:bg-blue-200 rounded">{synonym}</button>
                   ))}
+                  {thesaurusWord && lookupSynonyms(thesaurusWord).length === 0 && <p className="text-sm text-gray-500">No synonyms for that word.</p>}
                 </div>
               </div>
             </div>
@@ -2848,15 +3330,20 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
               <div className="p-4 space-y-4">
                 <label className="flex items-center gap-2">
                   <input type="checkbox" checked={collaborationEnabled} onChange={(e) => setCollaborationEnabled(e.target.checked)} className="rounded" />
-                  <span className="text-sm">Enable real-time collaboration</span>
+                  <span className="text-sm">Sync this document across browser tabs</span>
                 </label>
+                <p className="text-xs text-gray-500">Open the same file in another tab. Edits are sent live between those tabs. There is no separate collaboration server.</p>
                 {collaborationEnabled && (
-                  <div>
-                    <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Invite Collaborators</label>
-                    <input placeholder="Enter email addresses..." className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium block">Invite by name</label>
+                    <div className="flex gap-2">
+                      <input value={inviteName} onChange={(e) => setInviteName(e.target.value)} placeholder="Name" className="flex-1 text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent" />
+                      <button onClick={inviteCollaborator} className="px-3 py-1.5 bg-blue-500 text-white rounded text-sm">Copy invite</button>
+                    </div>
+                    {collaborators.length > 0 && <p className="text-xs text-gray-500">Here: {collaborators.join(', ')}</p>}
                   </div>
                 )}
-                <button onClick={closeModal} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Save Settings</button>
+                <button onClick={closeModal} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Done</button>
               </div>
             </div>
           )}
@@ -2869,30 +3356,12 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                 <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
               </div>
               <div className="p-4 grid grid-cols-2 gap-4">
-                {['Blank Document', 'Resume', 'Letter', 'Report', 'Memo', 'Essay'].map(template => (
-                  <button key={template} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:border-blue-500 transition-colors text-left">
-                    <div className="w-full h-32 bg-gray-100 dark:bg-gray-800 rounded mb-2"></div>
+                {Object.keys(DOCUMENT_TEMPLATES).map(template => (
+                  <button key={template} onClick={() => applyTemplate(template)} className="border border-gray-200 dark:border-gray-700 rounded-lg p-4 hover:border-blue-500 transition-colors text-left">
                     <div className="text-sm font-medium">{template}</div>
+                    <div className="text-xs text-gray-500 mt-1">Insert this starting document</div>
                   </button>
                 ))}
-              </div>
-            </div>
-          )}
-
-          {/* Feature 62: Mail Merge Modal */}
-          {modal === 'mailMerge' && (
-            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
-              <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
-                <h3 className="font-semibold">Mail Merge</h3>
-                <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
-              </div>
-              <div className="p-4 space-y-4">
-                <p className="text-sm text-gray-600 dark:text-gray-400">Merge your document with a data source to create personalized documents.</p>
-                <div>
-                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-1">Data Source (CSV)</label>
-                  <input type="file" accept=".csv" className="w-full text-sm" />
-                </div>
-                <button onClick={closeModal} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Start Merge</button>
               </div>
             </div>
           )}
@@ -2908,7 +3377,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                 <div className="border border-gray-200 dark:border-gray-700 rounded p-3">
                   <h4 className="text-sm font-medium mb-2">Create New Macro</h4>
                   <input value={newMacroName} onChange={(e) => setNewMacroName(e.target.value)} placeholder="Macro name" className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2" />
-                  <textarea value={newMacroCode} onChange={(e) => setNewMacroCode(e.target.value)} placeholder="Macro code (e.g., 'bold', 'italic')" className="w-full h-20 text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none mb-2" />
+                  <textarea value={newMacroCode} onChange={(e) => setNewMacroCode(e.target.value)} placeholder={"One command per line:\nbold\nitalic\nsize:18\nfont:Georgia\nalign:center\nheading:h2\ninsert:Hello"} className="w-full h-28 text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none mb-2" />
                   <button onClick={() => { if (newMacroName && newMacroCode) { setMacros([...macros, { id: Date.now().toString(), name: newMacroName, code: newMacroCode }]); setNewMacroName(''); setNewMacroCode(''); } }} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Create Macro</button>
                 </div>
                 {macros.length > 0 && (
@@ -2939,24 +3408,16 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                 <button onClick={closeModal} className="p-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded"><X className="w-4 h-4" /></button>
               </div>
               <div className="p-4 space-y-4">
-                <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={cloudSyncEnabled} onChange={(e) => setCloudSyncEnabled(e.target.checked)} className="rounded" />
-                  <span className="text-sm">Enable cloud sync</span>
+                <p className="text-sm text-gray-600 dark:text-gray-400">Download a copy of this document, or open a copy you saved earlier. Put the downloaded file in Google Drive, OneDrive, or Dropbox yourself.</p>
+                <button onClick={downloadBackup} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Download a copy</button>
+                <label className="block text-sm">
+                  <span className="font-medium block mb-1">Open a copy</span>
+                  <input type="file" accept=".html,.osuite.html,text/html" onChange={(e) => { const file = e.target.files?.[0]; if (file) importBackup(file); }} className="w-full text-sm" />
                 </label>
-                {cloudSyncEnabled && (
-                  <div className="space-y-2">
-                    <button className="w-full px-3 py-2 border border-gray-200 dark:border-gray-700 rounded hover:bg-gray-50 dark:hover:bg-gray-800 text-sm text-left flex items-center gap-2">
-                      <Cloud className="w-4 h-4" /> Google Drive
-                    </button>
-                    <button className="w-full px-3 py-2 border border-gray-200 dark:border-gray-700 rounded hover:bg-gray-50 dark:hover:bg-gray-800 text-sm text-left flex items-center gap-2">
-                      <Cloud className="w-4 h-4" /> OneDrive
-                    </button>
-                    <button className="w-full px-3 py-2 border border-gray-200 dark:border-gray-700 rounded hover:bg-gray-50 dark:hover:bg-gray-800 text-sm text-left flex items-center gap-2">
-                      <Cloud className="w-4 h-4" /> Dropbox
-                    </button>
-                  </div>
-                )}
-                <button onClick={closeModal} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Save Settings</button>
+                <label className="flex items-center gap-2">
+                  <input type="checkbox" checked={autoSaveEnabled} onChange={(e) => setAutoSaveEnabled(e.target.checked)} className="rounded" />
+                  <span className="text-sm">Also keep an automatic copy on this computer</span>
+                </label>
               </div>
             </div>
           )}
@@ -2970,7 +3431,18 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
               </div>
               <div className="p-4 space-y-4">
                 <label className="flex items-center gap-2">
-                  <input type="checkbox" checked={documentProtected} onChange={(e) => setDocumentProtected(e.target.checked)} className="rounded" />
+                  <input type="checkbox" checked={documentProtected} onChange={(e) => {
+                    if (!e.target.checked && protectionHash) {
+                      const entered = window.prompt('Enter the password to turn protection off') || '';
+                      if (hashPassword(entered) !== protectionHash) {
+                        addToast('Wrong password', 'error');
+                        return;
+                      }
+                      setProtectionHash('');
+                      setProtectionPassword('');
+                    }
+                    setDocumentProtected(e.target.checked);
+                  }} className="rounded" />
                   <span className="text-sm">Protect document (read-only)</span>
                 </label>
                 {documentProtected && (
@@ -2979,7 +3451,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                     <input type="password" value={protectionPassword} onChange={(e) => setProtectionPassword(e.target.value)} placeholder="Enter password" className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" />
                   </div>
                 )}
-                <button onClick={closeModal} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Apply Protection</button>
+                <button onClick={commitProtection} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Apply Protection</button>
               </div>
             </div>
           )}
@@ -3062,7 +3534,108 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                     </div>
                   </div>
                 </div>
+                <div>
+                  <label className="text-sm font-medium text-gray-700 dark:text-gray-300 block mb-2">Page numbers</label>
+                  <select value={pageNumberStyle} onChange={(e) => { setPageNumberStyle(e.target.value as typeof pageNumberStyle); setShowPageNumbers(true); }} className="w-full text-sm border border-gray-200 dark:border-gray-700 rounded px-2 py-1.5 bg-transparent">
+                    <option value="bottom-center">Bottom center</option>
+                    <option value="bottom-right">Bottom right</option>
+                    <option value="top-center">Top center</option>
+                    <option value="top-right">Top right</option>
+                  </select>
+                </div>
                 <button onClick={() => { closeModal(); addToast('Page setup applied', 'success'); }} className="w-full px-3 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded text-sm font-medium">Apply</button>
+              </div>
+            </div>
+          )}
+
+          {modal === 'wordArt' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b"><h3 className="font-semibold">WordArt</h3><button onClick={closeModal}><X className="w-4 h-4" /></button></div>
+              <div className="p-4 space-y-3">
+                <input value={wordArtText} onChange={(e) => setWordArtText(e.target.value)} className="w-full text-sm border rounded px-2 py-1.5 bg-transparent" />
+                <div className="grid grid-cols-2 gap-2">
+                  {WORD_ART_STYLES.map(style => (
+                    <button key={style.id} onClick={() => setWordArtStyle(style.id)} className={`border rounded p-2 text-sm ${wordArtStyle === style.id ? 'border-blue-500' : 'border-gray-200'}`}>{style.label}</button>
+                  ))}
+                </div>
+                <div className={`os-wordart os-wordart-${wordArtStyle} text-center`}>{wordArtText || 'WordArt'}</div>
+                <button onClick={insertWordArt} className="w-full px-3 py-2 bg-blue-500 text-white rounded text-sm">Insert WordArt</button>
+              </div>
+            </div>
+          )}
+          {modal === 'addIns' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b"><h3 className="font-semibold">Add-ins</h3><button onClick={closeModal}><X className="w-4 h-4" /></button></div>
+              <div className="p-4 space-y-2">
+                {BUILTIN_ADDINS.map(addin => (
+                  <button key={addin.id} onClick={() => runAddin(addin.id)} className="w-full text-left border rounded p-3 hover:border-blue-500">
+                    <div className="font-medium text-sm">{addin.name}</div>
+                    <div className="text-xs text-gray-500">{addin.description}</div>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          {modal === 'index' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b"><h3 className="font-semibold">Index</h3><button onClick={closeModal}><X className="w-4 h-4" /></button></div>
+              <div className="p-4 space-y-2">
+                <p className="text-sm text-gray-600">Mark words from the Insert menu, then insert the index here.</p>
+                <button onClick={insertIndex} className="w-full px-3 py-2 bg-blue-500 text-white rounded text-sm">Insert index</button>
+              </div>
+            </div>
+          )}
+          {modal === 'bibliography' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-lg max-h-[80vh] overflow-y-auto">
+              <div className="flex items-center justify-between p-4 border-b"><h3 className="font-semibold">Bibliography</h3><button onClick={closeModal}><X className="w-4 h-4" /></button></div>
+              <div className="p-4 space-y-2">
+                <input value={bibDraft.author} onChange={(e) => setBibDraft({ ...bibDraft, author: e.target.value })} placeholder="Author" className="w-full text-sm border rounded px-2 py-1.5 bg-transparent" />
+                <input value={bibDraft.title} onChange={(e) => setBibDraft({ ...bibDraft, title: e.target.value })} placeholder="Title" className="w-full text-sm border rounded px-2 py-1.5 bg-transparent" />
+                <input value={bibDraft.year} onChange={(e) => setBibDraft({ ...bibDraft, year: e.target.value })} placeholder="Year" className="w-full text-sm border rounded px-2 py-1.5 bg-transparent" />
+                <input value={bibDraft.source} onChange={(e) => setBibDraft({ ...bibDraft, source: e.target.value })} placeholder="Source" className="w-full text-sm border rounded px-2 py-1.5 bg-transparent" />
+                <button onClick={() => { if (!bibDraft.title.trim()) return; setBibliography(prev => [...prev, { id: Date.now().toString(), ...bibDraft }]); setBibDraft({ author: '', title: '', year: '', source: '' }); }} className="w-full px-3 py-2 border rounded text-sm">Add entry</button>
+                <ul className="text-sm space-y-1">{bibliography.map(entry => <li key={entry.id}>{entry.author} ({entry.year}). <em>{entry.title}</em>. {entry.source}</li>)}</ul>
+                <button onClick={() => {
+                  const items = bibliography.map(entry => `<li id="bib-${entry.id}">${escapeHtml(entry.author)} (${escapeHtml(entry.year)}). <em>${escapeHtml(entry.title)}</em>. ${escapeHtml(entry.source)}</li>`).join('');
+                  execCommand('insertHTML', `<h2 id="bibliography">Bibliography</h2><ul>${items || '<li>No sources yet.</li>'}</ul>`);
+                  closeModal();
+                }} className="w-full px-3 py-2 bg-blue-500 text-white rounded text-sm">Insert bibliography</button>
+              </div>
+            </div>
+          )}
+          {modal === 'caption' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md">
+              <div className="flex items-center justify-between p-4 border-b"><h3 className="font-semibold">Caption</h3><button onClick={closeModal}><X className="w-4 h-4" /></button></div>
+              <div className="p-4 space-y-3">
+                <input value={captionText} onChange={(e) => setCaptionText(e.target.value)} placeholder="Caption text" className="w-full text-sm border rounded px-2 py-1.5 bg-transparent" />
+                <button onClick={insertCaptionNow} className="w-full px-3 py-2 bg-blue-500 text-white rounded text-sm">Insert caption</button>
+              </div>
+            </div>
+          )}
+          {modal === 'crossReference' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-md max-h-[80vh] overflow-y-auto">
+              <div className="flex items-center justify-between p-4 border-b"><h3 className="font-semibold">Cross-reference</h3><button onClick={closeModal}><X className="w-4 h-4" /></button></div>
+              <div className="p-4 space-y-1">
+                {referenceTargets().map(target => (
+                  <button key={target.id} onClick={() => { target.element.id = target.id; restoreSelection(); execCommand('insertHTML', `<a href="#${target.id}">${escapeHtml(target.label)}</a>`); closeModal(); }} className="block w-full text-left px-2 py-1.5 text-sm hover:bg-gray-100 dark:hover:bg-gray-800 rounded">{target.label}</button>
+                ))}
+                {referenceTargets().length === 0 && <p className="text-sm text-gray-500">Add a heading, caption, or footnote first.</p>}
+              </div>
+            </div>
+          )}
+          {modal === 'compareDocuments' && (
+            <div className="bg-white dark:bg-gray-900 rounded-lg shadow-2xl w-full max-w-2xl max-h-[80vh] overflow-y-auto">
+              <div className="flex items-center justify-between p-4 border-b"><h3 className="font-semibold">Compare documents</h3><button onClick={closeModal}><X className="w-4 h-4" /></button></div>
+              <div className="p-4 space-y-3">
+                <p className="text-sm text-gray-600">Paste another version, or open a text file. Added lines are green and removed lines are red.</p>
+                <textarea value={compareText} onChange={(e) => setCompareText(e.target.value)} className="w-full h-32 text-sm border rounded px-2 py-1.5 bg-transparent" placeholder="Paste the other document" />
+                <input type="file" accept=".txt,.md,.html" onChange={(e) => { const file = e.target.files?.[0]; if (!file) return; file.text().then(setCompareText); }} className="text-sm" />
+                <button onClick={runCompare} className="px-3 py-2 bg-blue-500 text-white rounded text-sm">Compare</button>
+                <div className="font-mono text-xs space-y-0.5">
+                  {compareDiff.map((line, index) => (
+                    <div key={index} className={line.type === 'add' ? 'bg-green-100 text-green-900' : line.type === 'del' ? 'bg-red-100 text-red-900' : ''}>{line.type === 'add' ? '+ ' : line.type === 'del' ? '- ' : '  '}{line.text || ' '}</div>
+                  ))}
+                </div>
               </div>
             </div>
           )}
@@ -3083,23 +3656,33 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                       <div key={index} className="border border-gray-200 dark:border-gray-700 rounded p-3">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-sm font-medium text-red-600 dark:text-red-400">{word}</span>
-                          <button 
+                          <div className="flex gap-1">
+                          <button
                             onClick={() => {
-                              // Find and replace the word in the document
-                              if (editorRef.current) {
-                                const text = editorRef.current.innerHTML;
-                                const corrected = prompt(`Correct spelling for "${word}":`, word);
-                                if (corrected && corrected !== word) {
-                                  editorRef.current.innerHTML = text.replace(new RegExp(`\\b${word}\\b`, 'g'), corrected);
-                                  onChange(editorRef.current.innerHTML);
-                                  addToast(`Corrected "${word}" to "${corrected}"`, 'success');
-                                }
+                              if (!editorRef.current) return;
+                              const corrected = prompt(`Correct spelling for "${word}":`, word);
+                              if (corrected && corrected !== word) {
+                                replaceWordInTextNodes(editorRef.current, word, corrected);
+                                emitDocument();
+                                setMisspelledWords(prev => prev.filter(item => item !== word));
+                                addToast(`Corrected "${word}" to "${corrected}"`, 'success');
                               }
                             }}
                             className="px-2 py-1 text-xs bg-blue-500 hover:bg-blue-600 text-white rounded"
                           >
                             Correct
                           </button>
+                          <button
+                            onClick={() => {
+                              setUserWords(addUserDictionaryWord(word));
+                              setMisspelledWords(prev => prev.filter(item => item.toLowerCase() !== word.toLowerCase()));
+                              addToast(`Added "${word}" to the dictionary`, 'success');
+                            }}
+                            className="px-2 py-1 text-xs bg-gray-200 dark:bg-gray-700 rounded"
+                          >
+                            Add
+                          </button>
+                          </div>
                         </div>
                       </div>
                     ))}
@@ -3135,17 +3718,16 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
                         {issue.suggestion && (
                           <button 
                             onClick={() => {
-                              if (editorRef.current) {
-                                const text = editorRef.current.innerHTML;
-                                const start = issue.offset;
-                                const end = start + issue.length;
-                                const before = text.substring(0, start);
-                                const after = text.substring(end);
-                                editorRef.current.innerHTML = before + issue.suggestion + after;
-                                onChange(editorRef.current.innerHTML);
-                                addToast('Issue corrected', 'success');
-                                closeModal();
-                              }
+                              if (!editorRef.current || !issue.suggestion) return;
+                              const matched = (editorRef.current.textContent || '').slice(issue.offset, issue.offset + issue.length);
+                              let replacement = issue.suggestion;
+                              if (issue.ruleId === 'a-before-vowel') replacement = matched.replace(/^a\b/i, 'an');
+                              else if (issue.ruleId === 'their-there') replacement = matched.replace(/^their\b/i, 'there');
+                              else if (issue.ruleId === 'its-its') replacement = matched.replace(/^it's\b/i, 'its');
+                              replacePlainTextRange(editorRef.current, issue.offset, issue.length, replacement);
+                              emitDocument();
+                              setGrammarIssues(prev => prev.filter((_, itemIndex) => itemIndex !== index));
+                              addToast('Issue corrected', 'success');
                             }}
                             className="ml-2 px-3 py-1 text-xs bg-green-500 hover:bg-green-600 text-white rounded whitespace-nowrap"
                           >
