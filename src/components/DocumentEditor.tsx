@@ -184,6 +184,7 @@ interface DocumentEditorProps {
   onChange: (content: string) => void;
   fileName: string;
   readOnly?: boolean;
+  collaborationUrl?: string;
 }
 
 const PAGE_WIDTH_A4 = 816;

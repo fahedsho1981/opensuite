@@ -16,6 +16,7 @@ interface PresentationEditorProps {
   onChange: (content: Slide[]) => void;
   fileName: string;
   readOnly?: boolean;
+  collaborationUrl?: string;
 }
 
 const BACKGROUNDS = [

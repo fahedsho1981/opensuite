@@ -1,21 +1,92 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import { Download, Eye, Edit3, Columns, Bold, Italic, Code, Link, Image, List, ListOrdered, Quote, Heading1, Heading2, Heading3, Minus, CheckSquare } from 'lucide-react';
+import { getCollaborationService } from '../services/collaboration';
+import CollaborationBar from './CollaborationBar';
 
 interface MarkdownEditorProps {
   content: string;
   onChange: (content: string) => void;
   fileName: string;
   readOnly?: boolean;
+  collaborationUrl?: string;
 }
 
 type ViewMode = 'edit' | 'preview' | 'split';
 
-export default function MarkdownEditor({ content, onChange, fileName, readOnly = false }: MarkdownEditorProps) {
+export default function MarkdownEditor({ content, onChange, fileName, readOnly = false, collaborationUrl }: MarkdownEditorProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('split');
+  const [isCollaborating, setIsCollaborating] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const service = getCollaborationService();
+
+  // Initialize collaboration
+  useEffect(() => {
+    if (collaborationUrl && !readOnly) {
+      service.connect(collaborationUrl);
+      setIsCollaborating(true);
+
+      // Bind Yjs text to editor
+      const ytext = service.getYText('content');
+      
+      // Initialize with existing content if Yjs is empty
+      if (ytext.length === 0 && content) {
+        ytext.insert(0, content);
+      }
+
+      // Listen for Yjs changes → update editor
+      const observer = () => {
+        const newContent = ytext.toString();
+        if (newContent !== content) {
+          onChange(newContent);
+        }
+      };
+      ytext.observe(observer);
+
+      // Listen for editor changes → update Yjs
+      const textarea = textareaRef.current;
+      if (textarea) {
+        const handleInput = () => {
+          const newContent = textarea.value;
+          if (newContent !== ytext.toString()) {
+            service.getYDoc().transact(() => {
+              ytext.delete(0, ytext.length);
+              ytext.insert(0, newContent);
+            });
+          }
+        };
+        textarea.addEventListener('input', handleInput);
+
+        // Track cursor position
+        const handleSelectionChange = () => {
+          if (textarea.selectionStart !== undefined) {
+            service.updateCursor({
+              line: 0,
+              ch: textarea.selectionStart,
+            }, {
+              anchor: textarea.selectionStart,
+              head: textarea.selectionEnd,
+            });
+          }
+        };
+        textarea.addEventListener('select', handleSelectionChange);
+        textarea.addEventListener('click', handleSelectionChange);
+        textarea.addEventListener('keyup', handleSelectionChange);
+
+        return () => {
+          ytext.unobserve(observer);
+          textarea.removeEventListener('input', handleInput);
+          textarea.removeEventListener('select', handleSelectionChange);
+          textarea.removeEventListener('click', handleSelectionChange);
+          textarea.removeEventListener('keyup', handleSelectionChange);
+          service.disconnect();
+          setIsCollaborating(false);
+        };
+      }
+    }
+  }, [collaborationUrl, readOnly]);
 
   const insertMarkdown = (before: string, after: string = '') => {
     const textarea = textareaRef.current;
@@ -107,6 +178,7 @@ export default function MarkdownEditor({ content, onChange, fileName, readOnly =
 
   return (
     <div className="flex flex-col h-full bg-white dark:bg-gray-900">
+      {isCollaborating && <CollaborationBar />}
       {/* Toolbar */}
       <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 p-2">
         <div className="flex items-center gap-0.5">
