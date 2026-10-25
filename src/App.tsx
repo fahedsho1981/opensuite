@@ -5,6 +5,8 @@ import SpreadsheetEditor from './components/SpreadsheetEditor';
 import PresentationEditor from './components/PresentationEditor';
 import MarkdownEditor from './components/MarkdownEditor';
 import PDFViewer from './components/PDFViewer';
+import CollaborationBar from './components/CollaborationBar';
+import { getCollaborationService } from './services/collaboration';
 import type { OfficeFile, FileType } from './types';
 import { createNewFile, getFileIcon } from './utils/fileHandlers';
 import IntegrationPanel from './components/IntegrationPanel';
@@ -219,12 +221,25 @@ OpenSuite can be embedded in other applications:
   const [collaborationUrl, setCollaborationUrl] = useState<string | null>(null);
   const [collaborationStatus, setCollaborationStatus] = useState<string>('disconnected');
 
-  // Read collaboration URL from query params
+  // Read collaboration URL from query params and initialize service
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const wsUrl = params.get('wsUrl');
     if (wsUrl) {
       setCollaborationUrl(wsUrl);
+      // Initialize collaboration service
+      const service = getCollaborationService();
+      service.connect(wsUrl);
+      
+      // Listen for status changes
+      const unsubscribe = service.on('status:change', (status: string) => {
+        setCollaborationStatus(status);
+      });
+      
+      return () => {
+        unsubscribe();
+        service.disconnect();
+      };
     }
   }, []);
 
@@ -470,6 +485,9 @@ OpenSuite can be embedded in other applications:
           </button>
         </div>
       </header>
+
+      {/* Collaboration Bar - Shows when collaborating */}
+      {collaborationUrl && <CollaborationBar />}
 
       {/* Main Content */}
       <div className="flex flex-1 overflow-hidden">
