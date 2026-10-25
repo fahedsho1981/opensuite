@@ -121,6 +121,8 @@ import {
   OnboardingTour,
   FeedbackCollector,
 } from '../utils/support';
+import { getCollaborationService } from '../services/collaboration';
+import CollaborationBar from './CollaborationBar';
 
 declare global {
   interface Window {
@@ -303,7 +305,7 @@ interface Macro {
   code: string;
 }
 
-export default function DocumentEditor({ content, onChange, fileName, readOnly = false }: DocumentEditorProps) {
+export default function DocumentEditor({ content, onChange, fileName, readOnly = false, collaborationUrl }: DocumentEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const savedSelectionRef = useRef<Range | null>(null);
   const lastEmittedRef = useRef<string | null>(null);
@@ -325,6 +327,10 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   const [zoom, setZoom] = useState(100);
   const [showRuler, setShowRuler] = useState(true);
   const [modal, setModal] = useState<ModalType>('none');
+  const [isCollaborating, setIsCollaborating] = useState(false);
+  
+  const service = getCollaborationService();
+  const isRemoteChange = useRef(false);
   
   // Initialize monitoring and utilities
   const errorTracker = useRef(new ErrorTracker()).current;
@@ -394,6 +400,84 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       logger.info('DocumentEditor unmounted');
     };
   }, []);
+
+  // Initialize collaboration
+  useEffect(() => {
+    if (collaborationUrl && !readOnly) {
+      service.connect(collaborationUrl);
+      setIsCollaborating(true);
+
+      // Bind Yjs text to editor
+      const ytext = service.getYText('content');
+      
+      // Initialize with existing content if Yjs is empty
+      if (ytext.length === 0 && content) {
+        ytext.insert(0, content);
+      }
+
+      // Listen for Yjs changes → update editor (REMOTE changes)
+      const observer = () => {
+        if (isRemoteChange.current) return;
+        
+        const newContent = ytext.toString();
+        if (newContent !== content) {
+          isRemoteChange.current = true;
+          onChange(newContent);
+          
+          // Update editor DOM without losing cursor
+          if (editorRef.current) {
+            const selection = window.getSelection();
+            const savedRange = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
+            
+            editorRef.current.innerHTML = newContent;
+            
+            // Restore cursor position
+            if (savedRange && selection) {
+              try {
+                selection.removeAllRanges();
+                selection.addRange(savedRange);
+              } catch (e) {
+                // Cursor restoration failed, which is okay
+              }
+            }
+          }
+          
+          requestAnimationFrame(() => {
+            isRemoteChange.current = false;
+          });
+        }
+      };
+      ytext.observe(observer);
+
+      // Listen for editor changes → update Yjs (LOCAL changes)
+      const handleInput = () => {
+        if (isRemoteChange.current || !editorRef.current) return;
+        
+        const newContent = editorRef.current.innerHTML;
+        if (newContent !== ytext.toString()) {
+          isRemoteChange.current = true;
+          service.getYDoc().transact(() => {
+            ytext.delete(0, ytext.length);
+            ytext.insert(0, newContent);
+          });
+          onChange(newContent);
+          requestAnimationFrame(() => {
+            isRemoteChange.current = false;
+          });
+        }
+      };
+      
+      editorRef.current?.addEventListener('input', handleInput);
+
+      return () => {
+        ytext.unobserve(observer);
+        editorRef.current?.removeEventListener('input', handleInput);
+        service.disconnect();
+        setIsCollaborating(false);
+      };
+    }
+  }, [collaborationUrl, readOnly]);
+
   const [findText, setFindText] = useState('');
   const [replaceText, setReplaceText] = useState('');
   const [findCount, setFindCount] = useState(0);
@@ -2226,6 +2310,106 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
 
   return (
     <ErrorBoundary>
+    <div className="flex flex-col h-full bg-gray-100 dark:bg-gray-800">
+      {isCollaborating && <CollaborationBar />}
+      {/* Top Menu Bar */}
+      <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-3 py-1.5 flex items-center gap-1 text-sm overflow-x-auto">
+        {/* File Menu */}
+        <button onClick={handleSave} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 flex items-center gap-1 whitespace-nowrap">
+          <FileText className="w-3.5 h-3.5" /> File
+        </button>
+        
+        {/* Edit Menu */}
+        <button onClick={() => execCommand('undo')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Undo</button>
+        <button onClick={() => execCommand('redo')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Redo</button>
+        
+        {/* View Menu */}
+        <button onClick={() => setShowRuler(!showRuler)} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">View</button>
+        <button onClick={() => setShowHeaders(!showHeaders)} className={`px-2 py-1 rounded whitespace-nowrap ${showHeaders ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400' : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300'}`}>Headers</button>
+        
+        {/* Insert Menu */}
+        <button onClick={() => openModal('insertImage')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Image</button>
+        <button onClick={() => openModal('tableOfContents')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">TOC</button>
+        <button onClick={() => openModal('footnotes')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Footnote</button>
+        <button onClick={() => openModal('columns')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Columns</button>
+        
+        {/* Review Menu */}
+        <button 
+          onClick={() => setTrackChangesEnabled(!trackChangesEnabled)} 
+          className={`px-2 py-1 rounded whitespace-nowrap ${trackChangesEnabled ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400' : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300'}`}
+        >
+          Track
+        </button>
+        <button 
+          onClick={() => setShowComments(!showComments)} 
+          className={`px-2 py-1 rounded flex items-center gap-1 whitespace-nowrap ${showComments ? 'bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400' : 'hover:bg-gray-100 dark:hover:bg-gray-800 text-gray-700 dark:text-gray-300'}`}
+        >
+          <MessageSquare className="w-3.5 h-3.5" /> {comments.length}
+        </button>
+        
+        {/* Tools Menu */}
+        <button onClick={() => openModal('wordCountGoals')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Goals</button>
+        <button onClick={() => openModal('thesaurus')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Thesaurus</button>
+        <button onClick={() => openModal('watermarks')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Watermark</button>
+        <button onClick={() => openModal('macros')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Macros</button>
+        
+        {/* Advanced Features */}
+        <button onClick={() => openModal('autoSave')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Auto-Save</button>
+        <button onClick={() => openModal('versionHistory')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">History</button>
+        <button onClick={() => openModal('collaboration')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Collab</button>
+        <button onClick={() => openModal('templates')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Templates</button>
+        <button onClick={() => openModal('documentProtection')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Protect</button>
+        <button onClick={() => openModal('cloudStorage')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Cloud</button>
+        <button onClick={() => openModal('pageSetup')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap">Page Setup</button>
+        <button onClick={checkSpelling} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <CheckCircle className="w-3.5 h-3.5" /> Spell
+        </button>
+        <button onClick={runGrammarCheck} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <ListChecks className="w-3.5 h-3.5" /> Grammar
+        </button>
+        <button onClick={runAutoCorrect} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Wand2 className="w-3.5 h-3.5" /> Auto-Fix
+        </button>
+        <button onClick={showReadabilityStats} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <BookOpenCheck className="w-3.5 h-3.5" /> Stats
+        </button>
+        <button onClick={() => openModal('insertChart')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <BarChart3 className="w-3.5 h-3.5" /> Chart
+        </button>
+        <button onClick={() => openModal('mailMerge')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Mail className="w-3.5 h-3.5" /> Merge
+        </button>
+        <button onClick={() => openModal('textTransform')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <CaseSensitive className="w-3.5 h-3.5" /> Transform
+        </button>
+        <button onClick={() => openModal('dropCap')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Type className="w-3.5 h-3.5" /> Drop Cap
+        </button>
+        <button onClick={() => openModal('themes')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Palette className="w-3.5 h-3.5" /> Theme
+        </button>
+        <button onClick={() => openModal('language')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Languages className="w-3.5 h-3.5" /> Lang
+        </button>
+        <button onClick={() => openModal('documentProperties')} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <FileText className="w-3.5 h-3.5" /> Props
+        </button>
+        <button onClick={openPrintPreview} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Eye className="w-3.5 h-3.5" /> Preview
+        </button>
+        <button onClick={() => setShowShortcuts(true)} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Keyboard className="w-3.5 h-3.5" /> Shortcuts
+        </button>
+        <button onClick={() => setShowHelp(true)} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <HelpCircle className="w-3.5 h-3.5" /> Help
+        </button>
+        <button onClick={() => setShowBackup(true)} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Download className="w-3.5 h-3.5" /> Backup
+        </button>
+        <button onClick={() => setShowMonitoring(true)} className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 whitespace-nowrap flex items-center gap-1">
+          <Zap className="w-3.5 h-3.5" /> Status
+        </button>
+        
     <div className="flex flex-col h-full bg-gray-100 dark:bg-gray-800" onMouseDown={() => { if (openMenu !== 'none') closeMenus(); }}>
       <div className="no-print bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-3 py-1.5 flex items-center gap-1 text-sm overflow-x-auto" onMouseDown={keepEditorSelection}>
         {([
