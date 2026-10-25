@@ -88,6 +88,8 @@ import {
   OnboardingTour,
   FeedbackCollector,
 } from '../utils/support';
+import { getCollaborationService } from '../services/collaboration';
+import CollaborationBar from './CollaborationBar';
 
 declare global {
   interface Window {
@@ -283,12 +285,16 @@ interface Macro {
   code: string;
 }
 
-export default function DocumentEditor({ content, onChange, fileName, readOnly = false }: DocumentEditorProps) {
+export default function DocumentEditor({ content, onChange, fileName, readOnly = false, collaborationUrl }: DocumentEditorProps) {
   const editorRef = useRef<HTMLDivElement>(null);
   const savedSelectionRef = useRef<Range | null>(null);
   const [zoom, setZoom] = useState(100);
   const [showRuler, setShowRuler] = useState(true);
   const [modal, setModal] = useState<ModalType>('none');
+  const [isCollaborating, setIsCollaborating] = useState(false);
+  
+  const service = getCollaborationService();
+  const isRemoteChange = useRef(false);
   
   // Initialize monitoring and utilities
   const errorTracker = useRef(new ErrorTracker()).current;
@@ -358,6 +364,84 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
       logger.info('DocumentEditor unmounted');
     };
   }, []);
+
+  // Initialize collaboration
+  useEffect(() => {
+    if (collaborationUrl && !readOnly) {
+      service.connect(collaborationUrl);
+      setIsCollaborating(true);
+
+      // Bind Yjs text to editor
+      const ytext = service.getYText('content');
+      
+      // Initialize with existing content if Yjs is empty
+      if (ytext.length === 0 && content) {
+        ytext.insert(0, content);
+      }
+
+      // Listen for Yjs changes → update editor (REMOTE changes)
+      const observer = () => {
+        if (isRemoteChange.current) return;
+        
+        const newContent = ytext.toString();
+        if (newContent !== content) {
+          isRemoteChange.current = true;
+          onChange(newContent);
+          
+          // Update editor DOM without losing cursor
+          if (editorRef.current) {
+            const selection = window.getSelection();
+            const savedRange = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
+            
+            editorRef.current.innerHTML = newContent;
+            
+            // Restore cursor position
+            if (savedRange && selection) {
+              try {
+                selection.removeAllRanges();
+                selection.addRange(savedRange);
+              } catch (e) {
+                // Cursor restoration failed, which is okay
+              }
+            }
+          }
+          
+          requestAnimationFrame(() => {
+            isRemoteChange.current = false;
+          });
+        }
+      };
+      ytext.observe(observer);
+
+      // Listen for editor changes → update Yjs (LOCAL changes)
+      const handleInput = () => {
+        if (isRemoteChange.current || !editorRef.current) return;
+        
+        const newContent = editorRef.current.innerHTML;
+        if (newContent !== ytext.toString()) {
+          isRemoteChange.current = true;
+          service.getYDoc().transact(() => {
+            ytext.delete(0, ytext.length);
+            ytext.insert(0, newContent);
+          });
+          onChange(newContent);
+          requestAnimationFrame(() => {
+            isRemoteChange.current = false;
+          });
+        }
+      };
+      
+      editorRef.current?.addEventListener('input', handleInput);
+
+      return () => {
+        ytext.unobserve(observer);
+        editorRef.current?.removeEventListener('input', handleInput);
+        service.disconnect();
+        setIsCollaborating(false);
+      };
+    }
+  }, [collaborationUrl, readOnly]);
+
   const [findText, setFindText] = useState('');
   const [replaceText, setReplaceText] = useState('');
   const [findCount, setFindCount] = useState(0);
@@ -1792,6 +1876,7 @@ export default function DocumentEditor({ content, onChange, fileName, readOnly =
   return (
     <ErrorBoundary>
     <div className="flex flex-col h-full bg-gray-100 dark:bg-gray-800">
+      {isCollaborating && <CollaborationBar />}
       {/* Top Menu Bar */}
       <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-3 py-1.5 flex items-center gap-1 text-sm overflow-x-auto">
         {/* File Menu */}

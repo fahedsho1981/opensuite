@@ -10,6 +10,8 @@ import {
 } from 'lucide-react';
 import type { Slide } from '../types';
 import { v4 as uuidv4 } from 'uuid';
+import { getCollaborationService } from '../services/collaboration';
+import CollaborationBar from './CollaborationBar';
 
 interface PresentationEditorProps {
   content: Slide[];
@@ -66,7 +68,7 @@ interface SlideElement {
   };
 }
 
-export default function PresentationEditor({ content, onChange, fileName, readOnly = false }: PresentationEditorProps) {
+export default function PresentationEditor({ content, onChange, fileName, readOnly = false, collaborationUrl }: PresentationEditorProps) {
   const [currentSlide, setCurrentSlide] = useState(0);
   const [viewMode, setViewMode] = useState<ViewMode>('edit');
   const [activeTab, setActiveTab] = useState<TabType>('home');
@@ -84,8 +86,51 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
   const [isResizing, setIsResizing] = useState(false);
   const [resizeHandle, setResizeHandle] = useState<string | null>(null);
   const [resizeStart, setResizeStart] = useState({ x: 0, y: 0, width: 0, height: 0 });
+  const [isCollaborating, setIsCollaborating] = useState(false);
+  
+  const service = getCollaborationService();
+  const isRemoteChange = useRef(false);
 
   const slide = content[currentSlide];
+
+  // Initialize collaboration
+  useEffect(() => {
+    if (collaborationUrl && !readOnly) {
+      service.connect(collaborationUrl);
+      setIsCollaborating(true);
+
+      // Bind Yjs array to slides
+      const yarray = service.getYArray<Slide>('slides');
+      
+      // Initialize with existing content if Yjs is empty
+      if (yarray.length === 0 && content.length > 0) {
+        service.getYDoc().transact(() => {
+          yarray.insert(0, content);
+        });
+      }
+
+      // Listen for Yjs changes → update editor (REMOTE changes)
+      const observer = () => {
+        if (isRemoteChange.current) return;
+        
+        const newSlides = yarray.toArray();
+        if (JSON.stringify(newSlides) !== JSON.stringify(content)) {
+          isRemoteChange.current = true;
+          onChange(newSlides);
+          requestAnimationFrame(() => {
+            isRemoteChange.current = false;
+          });
+        }
+      };
+      yarray.observe(observer);
+
+      return () => {
+        yarray.unobserve(observer);
+        service.disconnect();
+        setIsCollaborating(false);
+      };
+    }
+  }, [collaborationUrl, readOnly]);
 
   // History management
   const pushHistory = (newContent: Slide[]) => {
@@ -119,6 +164,18 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
       notes: '',
     };
     const newContent = [...content, newSlide];
+    
+    if (isCollaborating) {
+      const yarray = service.getYArray<Slide>('slides');
+      isRemoteChange.current = true;
+      service.getYDoc().transact(() => {
+        yarray.insert(yarray.length, [newSlide]);
+      });
+      requestAnimationFrame(() => {
+        isRemoteChange.current = false;
+      });
+    }
+    
     onChange(newContent);
     pushHistory(newContent);
     setCurrentSlide(newContent.length - 1);
@@ -127,6 +184,18 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
   const deleteSlide = (index: number) => {
     if (content.length <= 1) return;
     const newContent = content.filter((_, i) => i !== index);
+    
+    if (isCollaborating) {
+      const yarray = service.getYArray<Slide>('slides');
+      isRemoteChange.current = true;
+      service.getYDoc().transact(() => {
+        yarray.delete(index, 1);
+      });
+      requestAnimationFrame(() => {
+        isRemoteChange.current = false;
+      });
+    }
+    
     onChange(newContent);
     pushHistory(newContent);
     setCurrentSlide(Math.min(currentSlide, newContent.length - 1));
@@ -134,6 +203,19 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
 
   const updateSlide = (index: number, updates: Partial<Slide>) => {
     const newContent = content.map((s, i) => i === index ? { ...s, ...updates } : s);
+    
+    if (isCollaborating) {
+      const yarray = service.getYArray<Slide>('slides');
+      isRemoteChange.current = true;
+      service.getYDoc().transact(() => {
+        yarray.delete(index, 1);
+        yarray.insert(index, [newContent[index]]);
+      });
+      requestAnimationFrame(() => {
+        isRemoteChange.current = false;
+      });
+    }
+    
     onChange(newContent);
     pushHistory(newContent);
   };
@@ -141,6 +223,18 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
   const duplicateSlide = (index: number) => {
     const slide = { ...content[index], id: uuidv4() };
     const newContent = [...content.slice(0, index + 1), slide, ...content.slice(index + 1)];
+    
+    if (isCollaborating) {
+      const yarray = service.getYArray<Slide>('slides');
+      isRemoteChange.current = true;
+      service.getYDoc().transact(() => {
+        yarray.insert(index + 1, [slide]);
+      });
+      requestAnimationFrame(() => {
+        isRemoteChange.current = false;
+      });
+    }
+    
     onChange(newContent);
     pushHistory(newContent);
     setCurrentSlide(index + 1);
@@ -151,6 +245,19 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
     const newContent = [...content];
     const [moved] = newContent.splice(from, 1);
     newContent.splice(to, 0, moved);
+    
+    if (isCollaborating) {
+      const yarray = service.getYArray<Slide>('slides');
+      isRemoteChange.current = true;
+      service.getYDoc().transact(() => {
+        yarray.delete(from, 1);
+        yarray.insert(to, [moved]);
+      });
+      requestAnimationFrame(() => {
+        isRemoteChange.current = false;
+      });
+    }
+    
     onChange(newContent);
     pushHistory(newContent);
     setCurrentSlide(to);
@@ -437,6 +544,7 @@ export default function PresentationEditor({ content, onChange, fileName, readOn
 
   return (
     <div className="flex flex-col h-full bg-gray-100 dark:bg-gray-800">
+      {isCollaborating && <CollaborationBar />}
       {/* Menu Bar */}
       <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-2 py-1 flex items-center gap-1 text-sm">
         <button className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 flex items-center gap-1">

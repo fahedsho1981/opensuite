@@ -14,6 +14,8 @@ import {
 import { exportXlsx } from '../utils/fileHandlers';
 import type { SpreadsheetCell, CellStyle, CellFormat, Sheet } from '../types';
 import { v4 as uuidv4 } from 'uuid';
+import { getCollaborationService } from '../services/collaboration';
+import CollaborationBar from './CollaborationBar';
 
 // Error Boundary Component
 interface ErrorBoundaryProps {
@@ -484,7 +486,7 @@ function createEmptyRow(cols: number): SpreadsheetCell[] {
   return Array.from({ length: cols }, () => createEmptyCell());
 }
 
-function SpreadsheetEditorInner({ content, onChange, fileName, readOnly = false }: SpreadsheetEditorProps) {
+function SpreadsheetEditorInner({ content, onChange, fileName, readOnly = false, collaborationUrl }: SpreadsheetEditorProps) {
   // FIX #3: Deep clone content to avoid reference issues
   const [sheets, setSheets] = useState<Sheet[]>(() => [{
     id: uuidv4(),
@@ -515,6 +517,10 @@ function SpreadsheetEditorInner({ content, onChange, fileName, readOnly = false 
   const [showBorders, setShowBorders] = useState(false);
   const [frozenRows, setFrozenRows] = useState(0);
   const [frozenCols, setFrozenCols] = useState(0);
+  const [isCollaborating, setIsCollaborating] = useState(false);
+  
+  const service = getCollaborationService();
+  const isRemoteChange = useRef(false);
   
   // Feature: Cell Merge
   const [mergedCells, setMergedCells] = useState<MergedCell[]>([]);
@@ -588,6 +594,45 @@ function SpreadsheetEditorInner({ content, onChange, fileName, readOnly = false 
     };
   }, [selectionRange, cells]);
 
+  // Initialize collaboration
+  useEffect(() => {
+    if (collaborationUrl && !readOnly) {
+      service.connect(collaborationUrl);
+      setIsCollaborating(true);
+
+      // Bind Yjs array to cells
+      const yarray = service.getYArray<SpreadsheetCell[]>('cells');
+      
+      // Initialize with existing content if Yjs is empty
+      if (yarray.length === 0 && cells.length > 0) {
+        service.getYDoc().transact(() => {
+          yarray.insert(0, cells);
+        });
+      }
+
+      // Listen for Yjs changes → update editor (REMOTE changes)
+      const observer = () => {
+        if (isRemoteChange.current) return;
+        
+        const newCells = yarray.toArray();
+        if (JSON.stringify(newCells) !== JSON.stringify(cells)) {
+          isRemoteChange.current = true;
+          updateCells(newCells, false); // Don't add to history for remote changes
+          requestAnimationFrame(() => {
+            isRemoteChange.current = false;
+          });
+        }
+      };
+      yarray.observe(observer);
+
+      return () => {
+        yarray.unobserve(observer);
+        service.disconnect();
+        setIsCollaborating(false);
+      };
+    }
+  }, [collaborationUrl, readOnly]);
+
   // FIX #4: History management using refs to avoid race conditions
   const pushHistory = useCallback((newCells: SpreadsheetCell[][]) => {
     const idx = historyIdxRef.current;
@@ -636,8 +681,22 @@ function SpreadsheetEditorInner({ content, onChange, fileName, readOnly = false 
         ? { ...existing.style, ...updates.style }
         : existing.style,
     };
+    
+    if (isCollaborating) {
+      const yarray = service.getYArray<SpreadsheetCell[]>('cells');
+      isRemoteChange.current = true;
+      service.getYDoc().transact(() => {
+        // Replace the entire row in Yjs
+        yarray.delete(row, 1);
+        yarray.insert(row, [newCells[row]]);
+      });
+      requestAnimationFrame(() => {
+        isRemoteChange.current = false;
+      });
+    }
+    
     updateCells(newCells);
-  }, [cells]);
+  }, [cells, isCollaborating]);
 
   const updateSelectedCellsStyle = (styleUpdates: Partial<CellStyle>) => {
     if (!selectionRange) return;
@@ -1571,6 +1630,7 @@ function SpreadsheetEditorInner({ content, onChange, fileName, readOnly = false 
 
   return (
     <div className="flex flex-col h-full bg-white dark:bg-gray-900">
+      {isCollaborating && <CollaborationBar />}
       {/* Menu Bar */}
       <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-700 px-2 py-1 flex items-center gap-1 text-sm">
         <button className="px-2 py-1 hover:bg-gray-100 dark:hover:bg-gray-800 rounded text-gray-700 dark:text-gray-300 flex items-center gap-1">
